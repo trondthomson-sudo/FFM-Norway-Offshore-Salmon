@@ -3079,7 +3079,7 @@ with st.expander("13.2 Oppankring - nedbetalingsplan (renter og avdrag per måne
     c1.metric("Sum renter over hele løpetiden", f"{fmt_int(plan['renter'].sum())} kr")
     c2.metric("Sum avdrag over hele løpetiden", f"{fmt_int(plan['avdrag'].sum())} kr")
 
-st.subheader("Konsolidert kontantstrøm")
+st.subheader(f"Anleggets samlede kontantstrøm - alle batcher + faste kostnader ({produkttype_valg})")
 st.caption(
     "Summert på tvers av ALLE batcher (ikke filtrert til én), pluss de faste kostnadene "
     "13-16 fra sidepanelet - disse er uavhengige av batch, men høyst reelle for anlegget "
@@ -3117,7 +3117,7 @@ kons_uke_for_kapitalbehov = build_konsolidert_kontantstrom(cfg, cashflow, fixed_
 bunn_dato = pd.to_datetime(fixed_costs_weekly.set_index("uke").reindex([bunn_uke])["dato"].iloc[0])
 c1, c2 = st.columns(2)
 c1.metric(
-    "Operasjonell kapital oppdretter må ha tilgjengelig",
+    f"Operasjonell kapital oppdretter må ha tilgjengelig ({produkttype_valg})",
     f"{fmt_int(abs(bunn_verdi))} kr",
     help="Bunnpunktet i KONTANTBEHOLDNINGEN (balansen, ukebasis) FØR egenkapitalinnskuddet - dvs. hvor "
          "mye egenkapital som må skytes inn i uke 1 for at kontantene aldri skal gå under null. Inkluderer "
@@ -3133,7 +3133,7 @@ c2.metric(
 )
 
 kons_visning = st.selectbox(
-    "Vis konsolidert som:", options=["Ukeoversikt", "Månedsoversikt", "Årsoversikt"], index=2,
+    "Vis samlet kontantstrøm som:", options=["Ukeoversikt", "Månedsoversikt", "Årsoversikt"], index=2,
     key="konsolidert_visning",
 )
 kons_period = {"Ukeoversikt": "uke", "Månedsoversikt": "maned", "Årsoversikt": "ar"}[kons_visning]
