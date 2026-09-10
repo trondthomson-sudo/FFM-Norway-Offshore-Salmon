@@ -22,14 +22,19 @@ import config_1tank as default_config
 from growth_tables import GrowthTables
 from scheduler_1tank import build_1tank_schedule, week_label, monday_of_week
 from scheduler_multitank import build_multitank_schedule
+
+# Postsmolt-visningen er midlertidig skjult for investorpresentasjoner
+# (bekreftet av bruker). All kode beholdes - sett True for å vise den igjen.
+VIS_POSTSMOLT = False
 from resource_ledger import (
     build_resource_ledger, summarize_by_cohort, summarize_by_month, summarize_by_year,
     build_monthly_overview, build_cashflow_ledger, summarize_cashflow_by_period, build_per_kg,
     build_fixed_costs_weekly, build_konsolidert_kontantstrom, build_escalation_table,
     build_isolert_batch_projeksjon, build_renter_avdrag_per_uke, build_resultatregnskap,
     build_matchet_kostnad_per_uke, build_balanse, build_batch_resultat_og_balanse,
-    build_batch_ukentlig_kostnad, build_renter_avdrag_per_ar, build_utleier_lonnsomhet,
+    build_batch_ukentlig_kostnad, build_batch_ukentlig_mengde, build_renter_avdrag_per_ar, build_utleier_lonnsomhet,
     build_utleier_irr, interpoler_fiskeverdi_kr_per_kg, escalate_price_by_year, build_utleier_regnskap,
+    build_eier_uke,
 )
 from formatting import fmt_int, fmt_float, parse_number, with_thousands, month_label, annuitet_manedsbelop, annuitetsplan
 
@@ -56,6 +61,53 @@ def _nok_input(label, key, default_value, container=None, help_text=None):
     når feltet mister fokus - også på tall brukeren selv skriver inn."""
     return _auto_format_number_input(label, key=key, default_value=float(default_value),
                                      min_value=0.0, container=container, help_text=help_text)
+
+
+def _ek_tilbakebetaling_graf(dates, verdier_kr, terskler, tittel, serie_navn):
+    """Månedlig graf av akkumulert kontantstrøm til egenkapital, med
+    horisontale linjer for innskutt egenkapital (terskler) og markering av
+    første måned der linjen krysses (= egenkapitalen er tilbakebetalt).
+    `terskler`: liste av (navn, beløp_kr)."""
+    fig, ax = plt.subplots(figsize=(20, 6.5))
+    x = list(range(len(dates)))
+    y = [v / 1e6 for v in verdier_kr]
+    ax.plot(x, y, color="#2f5d8a", linewidth=2.2, label=serie_navn)
+    ax.fill_between(x, y, 0, where=[v >= 0 for v in y], color="#2f5d8a", alpha=0.08)
+    ax.axhline(0, color="black", linewidth=0.8)
+    farger = ["#c0392b", "#8e44ad", "#d68910"]
+    tekst = []
+    for i, (navn, belop) in enumerate(terskler):
+        if belop <= 0:
+            continue
+        ax.axhline(belop / 1e6, color=farger[i % 3], linestyle="--", linewidth=1.4,
+                   label=f"{navn}: {fmt_int(belop)} kr")
+        kryss = next((k for k, v in enumerate(verdier_kr) if v >= belop), None)
+        if kryss is not None:
+            # Payback i år: måneder fra første måned i grafen (oppstart) til
+            # krysningsmåneden, delt på 12 - f.eks. 5,4 år.
+            payback_ar = (kryss + 1) / 12.0
+            ax.plot(kryss, verdier_kr[kryss] / 1e6, "o", color=farger[i % 3], markersize=11, zorder=5)
+            ax.annotate(f"{navn} tilbakebetalt\n{dates[kryss].strftime('%b %Y')} - payback {payback_ar:.1f} år",
+                        (kryss, verdier_kr[kryss] / 1e6), textcoords="offset points", xytext=(12, -34),
+                        fontsize=9, color=farger[i % 3], fontweight="bold",
+                        arrowprops={"arrowstyle": "->", "color": farger[i % 3]})
+            tekst.append(f"{navn} ({fmt_int(belop)} kr) er tilbakebetalt i {dates[kryss].strftime('%B %Y')} "
+                         f"- payback {payback_ar:.1f} år fra oppstart {dates[0].strftime('%b %Y')}")
+        else:
+            tekst.append(f"{navn} ({fmt_int(belop)} kr) er IKKE tilbakebetalt innenfor simuleringsperioden")
+    ticks = [k for k in x if dates[k].month == 1] or x[::12]
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([dates[k].strftime("%Y") for k in ticks])
+    ax.set_ylabel("MNOK")
+    ax.set_title(tittel, fontsize=11, loc="left")
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(loc="upper left", fontsize=9, frameon=False)
+    ax.set_xlim(0, len(x) - 1)
+    fig.subplots_adjust(left=0.05, right=0.98, top=0.92, bottom=0.12)
+    st.pyplot(fig, use_container_width=True, bbox_inches=None)
+    plt.close(fig)
+    for t in tekst:
+        st.caption("→ " + t)
 
 
 def _format_ledger_display(df: pd.DataFrame) -> pd.DataFrame:
@@ -203,11 +255,15 @@ def _render_table(df: pd.DataFrame, highlight_rows: list | None = None,
 
 
 def _batch_sort_key(bid: str):
-    """'K1-B8' -> (1, 8) - kronologisk sortering (kohort-nummer, deretter
-    batch-nummer) av underradene i den ekspanderbare kontantstrøm-tabellen,
-    i stedet for alfabetisk (som ville gitt K10 før K2)."""
+    """'G2-K1-B8' -> (2, 1, 8) - kronologisk sortering (generasjon, kohort,
+    batch) av underradene i de ekspanderbare tabellene, i stedet for
+    alfabetisk (som ville gitt G10 før G2)."""
+    # Multi-tank: "G3-K2-B5" -> (3, 2, 5) = generasjon, kohort/tank, batch.
+    m = re.match(r"G(\d+)-K(\d+)-B(\d+)", str(bid))
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
     m = re.match(r"K(\d+)-B(\d+)", str(bid))
-    return (int(m.group(1)), int(m.group(2))) if m else (10**9, 0)
+    return (0, int(m.group(1)), int(m.group(2))) if m else (10**9, 0, 0)
 
 
 def _build_kontantstrom_breakdown(cashflow: pd.DataFrame, batch_ukentlig: pd.DataFrame, period_kind: str,
@@ -579,12 +635,36 @@ def _render_expandable_kontantstrom(wide_df: pd.DataFrame, highlight_groups: lis
 
 
 st.set_page_config(page_title="Norway Offshore Salmon", layout="wide")
-st.title("Norway Offshore Salmon")
+st.title("Norway Offshore Salmon" + (" - Konsolidert (Aqualoop + NOS)" if st.session_state.get("produkttype_valg") == "Konsolidert" else ""))
 st.caption(
-    "Startpunkt for den nye modellen: én tank, N oppskrifter i rotasjon, "
-    "solgt direkte som postsmolt. Ressursregnskapet nederst er bygget for å "
-    "kunne utvides til flere tanker/kohorter/salgsbatcher uten omregning."
+    "Integrert produksjons- og finansmodell for Aqualoop Big Dipper: seks parallelle kohorter, "
+    "batchvis utslakting, ressursregnskap 0-16, kontantstrøm, resultat, balanse og kapitalbehov for "
+    "oppdretter (NOS) - og egne regnskaper, TC og IRR for SFaaS-aktøren (Aqualoop)."
 )
+
+# ---- BRUKERVEILEDNING (PDF) - ligger i repoet under docs/ og følger med
+#      Streamlit-linken. Nedlastingsknapp + innebygd visning. ----
+import os as _os
+_app_dir = _os.path.dirname(_os.path.abspath(__file__)) if "__file__" in globals() else _os.getcwd()
+_manual_path = _os.path.join(_app_dir, "docs", "Big_Dipper_FPA_Brukermanual.pdf")
+if _os.path.exists(_manual_path):
+    with open(_manual_path, "rb") as _f:
+        _manual_bytes = _f.read()
+    _c_m1, _c_m2 = st.columns([1, 5])
+    _c_m1.download_button("📄 Last ned brukerveiledning (PDF)", data=_manual_bytes,
+                          file_name="Big_Dipper_FPA_Brukermanual.pdf", mime="application/pdf",
+                          key="manual_download")
+    with st.expander("Vis brukerveiledningen her (metodedokument for modellen)", expanded=False):
+        # PDF-en vises som sidebilder (docs/manual_pages/side-NN.png) - Chrome
+        # og flere andre nettlesere blokkerer innebygde PDF-er via data-URL.
+        # Bildene lages fra PDF-en med: pdftoppm -png -r 110 <pdf> docs/manual_pages/side
+        _pages_dir = _os.path.join(_os.path.dirname(_manual_path), "manual_pages")
+        _pages = sorted(_os.path.join(_pages_dir, f) for f in _os.listdir(_pages_dir)) if _os.path.isdir(_pages_dir) else []
+        if _pages:
+            for _pg in _pages:
+                st.image(_pg, use_container_width=True)
+        else:
+            st.caption("Sidebildene (docs/manual_pages/) mangler - bruk nedlastingsknappen over.")
 
 # ----------------------------------------------------------------------
 # SIDEPANEL
@@ -600,6 +680,10 @@ with st.sidebar:
     # utleier vises alltid.
     _vis_irr = True
 
+    if st.session_state.get("produkttype_valg") == "Konsolidert":
+        st.info("Konsolidert er en ren OUTPUT-visning av 'SFaaS oppdrett': samme forutsetninger og felt, "
+                "men kapitalleien settes til 0 % og utleier-seksjonene skjules. Endringer du gjør her "
+                "gjelder også SFaaS - masteren er SFaaS oppdrett.")
     st.header("Salg")
 
     def _bruk_produkttype_variant():
@@ -641,7 +725,7 @@ with st.sidebar:
             # Slaktefisk = Big Dipper MULTI-TANK: N parallelle tanker, forskjøvet
             # innsett (uke 1 + 8 + 8 + ...), ÉN felles oppskrift for alle.
             # 50 vekstuker: 8 batcher, siste batch selges i uke 50 i tanken.
-            "Slaktefisk": {
+            "SFaaS oppdrett": {
                 "n_batches": 1, "rgi_pct": 100.0, "salgspris": "100",
                 # én oppskrift per tank (6 stk) - samme startverdier, juster fritt per tank
                 **{f"startw_{i}": 750.0 for i in range(8)},
@@ -654,21 +738,25 @@ with st.sidebar:
                 "salgspris_modus": "Fast pris (kr/kg)",
             },
         }
+        # "Konsolidert" har INGEN egne presets: den er en ren OUTPUT-visning av
+        # SFaaS-forutsetningene (samme session_state-felt), der kapitalleien
+        # overstyres til 0 % i beregningen - uten å røre verdien som står i
+        # SFaaS. Bytte frem og tilbake nullstiller derfor ingenting.
+        presets["Konsolidert"] = {}
         for key, verdi in presets.get(valg, {}).items():
             st.session_state[key] = verdi
 
     produkttype_valg = st.radio(
-        "Produkttype", options=["Postsmolt 2x", "Slaktefisk"],
-        index=1 if default_config.PRODUKTTYPE == "Slaktefisk" else 0,
+        # "Postsmolt 2x" er midlertidig SKJULT fra menyen (ikke slettet - all
+        # kode, presets og logikk står urørt). Sett VIS_POSTSMOLT = True for å
+        # ta den tilbake i menyen. Default-visning er SFaaS oppdrett.
+        "Produkttype / visning", options=(["Postsmolt 2x"] if VIS_POSTSMOLT else []) + ["SFaaS oppdrett", "Konsolidert"],
+        index=(1 if VIS_POSTSMOLT else 0),
         key="produkttype_valg", on_change=_bruk_produkttype_variant,
-        help="'Postsmolt 2x' bruker TO UAVHENGIGE oppskrifter (egen smoltvekt/antall/varighet per "
-             "kohort, default like) - juster hver for seg under 'Rotasjon'. Rotasjonen (24+2 "
-             "uker x 2) treffer nøyaktig 52 uker, så det er ingen kalenderdrift over tid. "
-             "'Slaktefisk': disse kostnadene gjelder, selges som HOG (hodekappet vekt) i stedet "
-             "for WFE (levendevekt). "
-             "(Postsmolt 3x/4x er midlertidig fjernet fra sidepanelet - 51-ukers rotasjonen der "
-             "ga en kalenderdrift over mange år som økte tettheten jevnt. Fortsatt i koden som "
-             "presets hvis dere vil ta dem tilbake senere.)",
+        help="'SFaaS oppdrett': Big Dipper slaktefisk, oppdretter (NOS) leier anlegget av Aqualoop - "
+             "kapitalleie 12 %, egne regnskaper for utleier nederst. 'Konsolidert': identisk modell, men "
+             "kapitalleie 0 % (Aqualoop + NOS sett under ett) og utleier-seksjonene skjult. Begge selges "
+             "som HOG (hodekappet vekt) i stedet for WFE (levendevekt).",
     )
     # VIKTIG: on_change over kjører KUN når radioknappen faktisk ENDRES ved
     # klikk - laster du siden på nytt mens "Slaktefisk" (eller hvilket som
@@ -680,7 +768,8 @@ with st.sidebar:
     if st.button(f"↺ Sett '{produkttype_valg}' til standardverdier", key="tving_preset_knapp"):
         _bruk_produkttype_variant()
         st.rerun()
-    produkttype = "Slaktefisk" if produkttype_valg == "Slaktefisk" else "Postsmolt"
+    produkttype = "Slaktefisk" if produkttype_valg in ("SFaaS oppdrett", "Konsolidert") else "Postsmolt"
+    konsolidert = (produkttype_valg == "Konsolidert")
     if produkttype == "Slaktefisk":
         hog_faktor = st.number_input(
             "HOG-faktor (andel av WFE)", value=float(default_config.HOG_FAKTOR),
@@ -768,8 +857,15 @@ with st.sidebar:
         st.markdown("**1) Kapitalleie**")
         c1, c2 = st.columns(2)
         capex = _nok_input("CAPEX (NOK)", "hx_capex", hx["capex_nok"], container=c1)
-        kapitalleie_pct_txt = c2.text_input("Kapitalleie-sats (%)", value=fmt_float(hx["kapitalleie_pct"] * 100, 1), key="hx_kapitalleie_pct")
+        kapitalleie_pct_txt = c2.text_input("Kapitalleie-sats (%)", value=fmt_float(hx["kapitalleie_pct"] * 100, 1), key="hx_kapitalleie_pct",
+                                            disabled=konsolidert,
+                                            help="I 'Konsolidert' overstyres satsen til 0 % (ingen leie mellom Aqualoop og NOS) - "
+                                                 "verdien her beholdes for SFaaS-visningen.")
         kapitalleie_pct = parse_number(kapitalleie_pct_txt, hx["kapitalleie_pct"] * 100) / 100.0
+        kapitalleie_pct_sfaas = kapitalleie_pct   # SFaaS-satsen - brukes til å dimensjonere banklånet i konsolidert
+        if konsolidert:
+            kapitalleie_pct = 0.0   # konsolidert: anlegg + drift under ett, ingen kapitalleie
+            st.caption("→ Konsolidert visning: kapitalleie satt til 0 % i beregningen (SFaaS-satsen over beholdes).")
         # Reforhandling av TC underveis (inntil to ganger): velg ÅR i rullegardin
         # og hvor stor andel av GAPET til nybyggparitet som skal hentes inn.
         # Selve den nye satsen regnes ut lenger ned (der eskaleringstabellen er
@@ -777,10 +873,12 @@ with st.sidebar:
         _rp_ar_valg = ["Ikke i bruk"] + [str(y) for y in range(int(st.session_state.get("startaar", default_config.START_ISO_YEAR)) + 1,
                                                               int(st.session_state.get("startaar", default_config.START_ISO_YEAR)) + int(default_config.N_YEARS_TO_RUN) + 1)]
         reforhandlinger = []
-        _rf_def = getattr(default_config, "TC_REFORHANDLING_DEFAULTS", [{"ar": None, "andel": 0.5}] * 2)
-        st.caption("Reforhandling av TC (ny kapitalleie-sats) underveis - gjelder fra 1. januar valgt år. "
-                   "Ny TC = dagens (eskalerte) TC + valgt andel av gapet opp til nybyggparitet det året.")
-        for _k in range(2):
+        _rf_def = ([{"ar": None, "andel": 0.5}] * 2 if konsolidert
+                   else getattr(default_config, "TC_REFORHANDLING_DEFAULTS", [{"ar": None, "andel": 0.5}] * 2))
+        if not konsolidert:
+            st.caption("Reforhandling av TC (ny kapitalleie-sats) underveis - gjelder fra 1. januar valgt år. "
+                       "Ny TC = dagens (eskalerte) TC + valgt andel av gapet opp til nybyggparitet det året.")
+        for _k in (range(2) if not konsolidert else []):
             _ca, _cb = st.columns(2)
             _def_ar = str(_rf_def[_k]["ar"]) if _rf_def[_k].get("ar") else "Ikke i bruk"
             _def_idx = _rp_ar_valg.index(_def_ar) if _def_ar in _rp_ar_valg else 0
@@ -792,13 +890,16 @@ with st.sidebar:
                 reforhandlinger.append({"ar": int(_rp_ar_txt), "andel": _rp_andel / 100.0})
         kapitalleie_reprising = []   # fylles ut senere (år, sats) når eskaleringen er kjent
         _np = getattr(default_config, "NYBYGGPARITET_DEFAULTS", {"byggeindeks_pct_ar": 0.04, "ebitda_yield_pct": 0.12})
-        st.markdown("**Nybyggparitet (guide for ny TC)**")
-        _c1, _c2 = st.columns(2)
-        byggeindeks_txt = _c1.text_input("Byggeindeks (%/år)", value=fmt_float(_np["byggeindeks_pct_ar"] * 100, 1), key="np_byggeindeks")
-        ebitda_yield_txt = _c2.text_input("EBITDA-yield på nybyggpris (%)", value=fmt_float(_np["ebitda_yield_pct"] * 100, 1), key="np_yield")
-        byggeindeks_pct_ar = parse_number(byggeindeks_txt, _np["byggeindeks_pct_ar"] * 100) / 100.0
-        ebitda_yield_pct = parse_number(ebitda_yield_txt, _np["ebitda_yield_pct"] * 100) / 100.0
-        st.caption(f"→ Nybyggpris = CAPEX x (1 + {byggeindeks_pct_ar*100:.1f} %)^år siden {int(default_config.START_ISO_YEAR)}; "
+        byggeindeks_pct_ar, ebitda_yield_pct = _np["byggeindeks_pct_ar"], _np["ebitda_yield_pct"]
+        if not konsolidert:
+            st.markdown("**Nybyggparitet (guide for ny TC)**")
+            _c1, _c2 = st.columns(2)
+            byggeindeks_txt = _c1.text_input("Byggeindeks (%/år)", value=fmt_float(_np["byggeindeks_pct_ar"] * 100, 1), key="np_byggeindeks")
+            ebitda_yield_txt = _c2.text_input("EBITDA-yield på nybyggpris (%)", value=fmt_float(_np["ebitda_yield_pct"] * 100, 1), key="np_yield")
+            byggeindeks_pct_ar = parse_number(byggeindeks_txt, _np["byggeindeks_pct_ar"] * 100) / 100.0
+            ebitda_yield_pct = parse_number(ebitda_yield_txt, _np["ebitda_yield_pct"] * 100) / 100.0
+        if not konsolidert:
+          st.caption(f"→ Nybyggpris = CAPEX x (1 + {byggeindeks_pct_ar*100:.1f} %)^år siden {int(default_config.START_ISO_YEAR)}; "
                    f"EBITDA-krav = nybyggpris x {ebitda_yield_pct*100:.1f} %; guide-TC = EBITDA-krav + årets driftskostnader i "
                    "leien. Tabellen ligger under 'Lønnsomhet - Utleier'.")
         kapitalleie_ar = capex * kapitalleie_pct
@@ -878,77 +979,105 @@ with st.sidebar:
                             lonn_lok_ar + lonn_land_ar + sosiale_ar + forsikring_ar + adk_ar)
         st.markdown(f"**Sum - 13. Leie av Big Dipper-anlegg (ekskl. desinfeksjon): {fmt_int(leie_hexacage_ar)} kr/år**")
 
-    with st.expander("Lønnsomhet - Utleier (Big Dipper/Aqualoop) - forutsetninger", expanded=False):
-        st.caption(
-            "Egen lønnsomhetsmodell for UTLEIER (eier av anlegget), atskilt fra oppdretters "
-            "P&L/balanse ellers i appen - se full forklaring under overskriften lenger ned. "
-            "Utleiers EGEN banklånsfinansiering av CAPEX, skattesats og vedlikeholdsinvestering "
-            "under er HELT NYE antakelser, ikke bekreftet mot faktiske lånevilkår."
-        )
-        ux = dict(default_config.UTLEIER_DEFAULTS)
-        c1, c2, c3 = st.columns(3)
-        ebitda_mult_txt = c1.text_input("Belåning (x EBITDA)", value=fmt_float(ux["ebitda_multipel"], 1), key="ux_ebitda_mult")
-        swap_txt = c2.text_input("Swap-rente (%/år)", value=fmt_float(ux["swap_rente_pct"] * 100, 2), key="ux_swap")
-        paslag_txt = c3.text_input("Kredittpåslag (%/år)", value=fmt_float(ux["kredittpaslag_pct"] * 100, 2), key="ux_paslag")
-        ebitda_multipel = parse_number(ebitda_mult_txt, ux["ebitda_multipel"])
-        swap_rente_pct = parse_number(swap_txt, ux["swap_rente_pct"] * 100) / 100.0
-        kredittpaslag_pct = parse_number(paslag_txt, ux["kredittpaslag_pct"] * 100) / 100.0
-        bankrente_pct_ar = swap_rente_pct + kredittpaslag_pct
-        banklan_belop_preview = kapitalleie_ar * ebitda_multipel
-        st.caption(
-            f"→ Bankrente: {swap_rente_pct*100:.2f} % swap + {kredittpaslag_pct*100:.2f} % påslag = "
-            f"{bankrente_pct_ar*100:.2f} % p.a. Banklån: {fmt_int(kapitalleie_ar)} (EBITDA) x "
-            f"{ebitda_multipel:.1f} = {fmt_int(banklan_belop_preview)} kr"
-        )
-        banklan_ar_val = st.number_input("Nedbetaling banklån (år)", value=int(ux["banklan_nedbetaling_ar"]), min_value=1, key="ux_banklan_ar")
-        avskrivningstid_ar = st.number_input("Avskrivningstid anlegg (år, lineært)", min_value=1, max_value=60,
-                                             value=int(ux.get("avskrivningstid_ar", 25)), step=1, key="ux_avskrivningstid",
-                                             help="Gjelder CAPEX og vedlikeholdsinvesteringer (fra året etter de gjøres). "
-                                                  "Påvirker skatt og bokført verdi - ikke EBITDA.")
-        c1, c2 = st.columns(2)
-        refi_intervall_ar = int(c1.number_input("Refinansier hvert (år)", min_value=0, max_value=20,
-                                                value=int(ux.get("refi_intervall_ar", 0)), step=1, key="ux_refi_intervall",
-                                                help="0 = ingen refinansiering. Ved refinansiering innfris restgjeld og nytt lån tas opp."))
-        refi_mult_txt = c2.text_input("Refinansier til (x neste års EBITDA)", value=fmt_float(ux.get("refi_multipel", 5.0), 1), key="ux_refi_mult")
-        refi_multipel = parse_number(refi_mult_txt, ux.get("refi_multipel", 5.0))
-        if refi_intervall_ar > 0:
-            st.caption(f"→ Hvert {refi_intervall_ar}. år: nytt lån = {refi_multipel:.1f} x neste års EBITDA; "
-                       "differansen mot restgjelden utbetales til eier (refinansieringsproveny) og ny annuitet starter.")
-
-        c1, c2, c3 = st.columns(3)
-        skattesats_txt = c1.text_input("Skattesats (%)", value=fmt_float(ux["skattesats_pct"] * 100, 1), key="ux_skattesats")
-        # Vedlikeholdsinvestering settes som BELØP første år (NOK), deretter
-        # inflasjonsjustert - ikke lenger som % av CAPEX (bekreftet av bruker).
-        _vedl_default = ux.get("vedlikeholdsinvestering_nok_forste_ar", capex * ux["vedlikeholdsinvestering_pct_capex"])
-        vedlikeholdsinvestering_nok = _nok_input("Vedlikeholdsinvestering, første år (NOK)", "ux_vedlikehold_nok", _vedl_default, container=c2)
-        vedlikehold_indeks_txt = c3.text_input("- deretter indeksert (%/år)", value=fmt_float(ux["vedlikeholdsinvestering_indeksering_pct_ar"] * 100, 1), key="ux_vedlikehold_indeks")
-        skattesats_pct = parse_number(skattesats_txt, ux["skattesats_pct"] * 100) / 100.0
-        vedlikeholdsinvestering_pct_capex = (vedlikeholdsinvestering_nok / capex) if capex > 0 else 0.0  # internt format i utleiermodellen
-        vedlikeholdsinvestering_indeksering_pct_ar = parse_number(vedlikehold_indeks_txt, ux["vedlikeholdsinvestering_indeksering_pct_ar"] * 100) / 100.0
-        st.caption(
-            f"→ Vedlikeholdsinvestering første år: {fmt_int(vedlikeholdsinvestering_nok)} kr "
-            f"({vedlikeholdsinvestering_pct_capex*100:.2f} % av CAPEX), deretter +{vedlikeholdsinvestering_indeksering_pct_ar*100:.1f} % årlig."
-        )
-
-        # Skjult bak en kode, IKKE bare en kollapset boks - se _vis_irr under
-        # (i toppen av sidepanelet). Uten riktig kode brukes ux-defaultene
-        # stille i bakgrunnen (IRR-tallet beregnes fortsatt internt, kun
-        # SELVE VISNINGEN er skjult - se hovedinnholdet lenger ned).
-        if _vis_irr:
-            st.markdown("**IRR / exit-forutsetninger**")
-            c1, c2 = st.columns(2)
-            holding_years_val = c1.number_input("Eiertid før exit (år)", value=int(ux["holding_years"]), min_value=1, key="ux_holding_years")
-            terminal_mult_txt = c2.text_input("EV/EBITDA-multippel (terminalverdi)", value=fmt_float(ux["terminal_ebitda_multipel"], 1), key="ux_terminal_mult",
-                                              help="Terminalverdi ved exit = multippel x EBITDA året ETTER eiertiden (fremadskuende).")
-            terminal_ebitda_multipel = parse_number(terminal_mult_txt, ux["terminal_ebitda_multipel"])
+    if not konsolidert:
+        with st.expander("Lønnsomhet - Utleier (Big Dipper/Aqualoop) - forutsetninger", expanded=False):
             st.caption(
-                f"→ IRR beregnes på egenkapitalens kontantstrøm over {holding_years_val} år, med en terminalverdi "
-                f"ved utgangen av år {holding_years_val} lik {terminal_ebitda_multipel:.1f}x EBITDA ÅRET ETTER "
-                f"(fremadskuende multippel), minus gjenværende saldo på utleiers eget banklån på det tidspunktet."
+                "Egen lønnsomhetsmodell for UTLEIER (eier av anlegget), atskilt fra oppdretters "
+                "P&L/balanse ellers i appen - se full forklaring under overskriften lenger ned. "
+                "Utleiers EGEN banklånsfinansiering av CAPEX, skattesats og vedlikeholdsinvestering "
+                "under er HELT NYE antakelser, ikke bekreftet mot faktiske lånevilkår."
             )
-        else:
-            holding_years_val = int(ux["holding_years"])
-            terminal_ebitda_multipel = ux["terminal_ebitda_multipel"]
+            ux = dict(default_config.UTLEIER_DEFAULTS)
+            c1, c2, c3 = st.columns(3)
+            ebitda_mult_txt = c1.text_input("Belåning (x EBITDA)", value=fmt_float(ux["ebitda_multipel"], 1), key="ux_ebitda_mult")
+            swap_txt = c2.text_input("Swap-rente (%/år)", value=fmt_float(ux["swap_rente_pct"] * 100, 2), key="ux_swap")
+            paslag_txt = c3.text_input("Kredittpåslag (%/år)", value=fmt_float(ux["kredittpaslag_pct"] * 100, 2), key="ux_paslag")
+            ebitda_multipel = parse_number(ebitda_mult_txt, ux["ebitda_multipel"])
+            swap_rente_pct = parse_number(swap_txt, ux["swap_rente_pct"] * 100) / 100.0
+            kredittpaslag_pct = parse_number(paslag_txt, ux["kredittpaslag_pct"] * 100) / 100.0
+            bankrente_pct_ar = swap_rente_pct + kredittpaslag_pct
+            banklan_belop_preview = kapitalleie_ar * ebitda_multipel
+            st.caption(
+                f"→ Bankrente: {swap_rente_pct*100:.2f} % swap + {kredittpaslag_pct*100:.2f} % påslag = "
+                f"{bankrente_pct_ar*100:.2f} % p.a. Banklån: {fmt_int(kapitalleie_ar)} (EBITDA) x "
+                f"{ebitda_multipel:.1f} = {fmt_int(banklan_belop_preview)} kr"
+            )
+            banklan_ar_val = st.number_input("Nedbetaling banklån (år)", value=int(ux["banklan_nedbetaling_ar"]), min_value=1, key="ux_banklan_ar")
+            avskrivningstid_ar = st.number_input("Avskrivningstid anlegg (år, lineært)", min_value=1, max_value=60,
+                                                 value=int(ux.get("avskrivningstid_ar", 25)), step=1, key="ux_avskrivningstid",
+                                                 help="Gjelder CAPEX og vedlikeholdsinvesteringer (fra året etter de gjøres). "
+                                                      "Påvirker skatt og bokført verdi - ikke EBITDA.")
+            c1, c2 = st.columns(2)
+            refi_intervall_ar = int(c1.number_input("Refinansier hvert (år)", min_value=0, max_value=20,
+                                                    value=int(ux.get("refi_intervall_ar", 0)), step=1, key="ux_refi_intervall",
+                                                    help="0 = ingen refinansiering. Ved refinansiering innfris restgjeld og nytt lån tas opp."))
+            refi_mult_txt = c2.text_input("Refinansier til (x neste års EBITDA)", value=fmt_float(ux.get("refi_multipel", 5.0), 1), key="ux_refi_mult")
+            refi_multipel = parse_number(refi_mult_txt, ux.get("refi_multipel", 5.0))
+            if refi_intervall_ar > 0:
+                st.caption(f"→ Hvert {refi_intervall_ar}. år: nytt lån = {refi_multipel:.1f} x neste års EBITDA; "
+                           "differansen mot restgjelden utbetales til eier (refinansieringsproveny) og ny annuitet starter.")
+
+            c1, c2, c3 = st.columns(3)
+            skattesats_txt = c1.text_input("Skattesats (%)", value=fmt_float(ux["skattesats_pct"] * 100, 1), key="ux_skattesats")
+            # Vedlikeholdsinvestering settes som BELØP første år (NOK), deretter
+            # inflasjonsjustert - ikke lenger som % av CAPEX (bekreftet av bruker).
+            _vedl_default = ux.get("vedlikeholdsinvestering_nok_forste_ar", capex * ux["vedlikeholdsinvestering_pct_capex"])
+            vedlikeholdsinvestering_nok = _nok_input("Vedlikeholdsinvestering, første år (NOK)", "ux_vedlikehold_nok", _vedl_default, container=c2)
+            vedlikehold_indeks_txt = c3.text_input("- deretter indeksert (%/år)", value=fmt_float(ux["vedlikeholdsinvestering_indeksering_pct_ar"] * 100, 1), key="ux_vedlikehold_indeks")
+            skattesats_pct = parse_number(skattesats_txt, ux["skattesats_pct"] * 100) / 100.0
+            vedlikeholdsinvestering_pct_capex = (vedlikeholdsinvestering_nok / capex) if capex > 0 else 0.0  # internt format i utleiermodellen
+            vedlikeholdsinvestering_indeksering_pct_ar = parse_number(vedlikehold_indeks_txt, ux["vedlikeholdsinvestering_indeksering_pct_ar"] * 100) / 100.0
+            st.caption(
+                f"→ Vedlikeholdsinvestering første år: {fmt_int(vedlikeholdsinvestering_nok)} kr "
+                f"({vedlikeholdsinvestering_pct_capex*100:.2f} % av CAPEX), deretter +{vedlikeholdsinvestering_indeksering_pct_ar*100:.1f} % årlig."
+            )
+
+            # Skjult bak en kode, IKKE bare en kollapset boks - se _vis_irr under
+            # (i toppen av sidepanelet). Uten riktig kode brukes ux-defaultene
+            # stille i bakgrunnen (IRR-tallet beregnes fortsatt internt, kun
+            # SELVE VISNINGEN er skjult - se hovedinnholdet lenger ned).
+            if _vis_irr:
+                st.markdown("**IRR / exit-forutsetninger**")
+                c1, c2 = st.columns(2)
+                holding_years_val = c1.number_input("Eiertid før exit (år)", value=int(ux["holding_years"]), min_value=1, key="ux_holding_years")
+                terminal_mult_txt = c2.text_input("EV/EBITDA-multippel (terminalverdi)", value=fmt_float(ux["terminal_ebitda_multipel"], 1), key="ux_terminal_mult",
+                                                  help="Terminalverdi ved exit = multippel x EBITDA året ETTER eiertiden (fremadskuende).")
+                terminal_ebitda_multipel = parse_number(terminal_mult_txt, ux["terminal_ebitda_multipel"])
+                st.caption(
+                    f"→ IRR beregnes på egenkapitalens kontantstrøm over {holding_years_val} år, med en terminalverdi "
+                    f"ved utgangen av år {holding_years_val} lik {terminal_ebitda_multipel:.1f}x EBITDA ÅRET ETTER "
+                    f"(fremadskuende multippel), minus gjenværende saldo på utleiers eget banklån på det tidspunktet."
+                )
+            else:
+                holding_years_val = int(ux["holding_years"])
+                terminal_ebitda_multipel = ux["terminal_ebitda_multipel"]
+
+    else:
+        # Konsolidert visning: ingen utleier-boks, men CAPEX/lån/avskrivning
+        # flyttes over på oppdretter - forutsetningene hentes fra SFaaS-feltene
+        # (session_state) slik brukeren har satt dem der, ellers defaults.
+        ux = dict(default_config.UTLEIER_DEFAULTS)
+        _ss = st.session_state
+        ebitda_multipel = parse_number(str(_ss.get("ux_ebitda_mult", "")), ux["ebitda_multipel"])
+        bankrente_pct_ar = (parse_number(str(_ss.get("ux_swap", "")), ux["swap_rente_pct"] * 100)
+                            + parse_number(str(_ss.get("ux_paslag", "")), ux["kredittpaslag_pct"] * 100)) / 100.0
+        banklan_belop_preview = capex * kapitalleie_pct_sfaas * ebitda_multipel
+        banklan_ar_val = int(_ss.get("ux_banklan_ar", ux["banklan_nedbetaling_ar"]))
+        avskrivningstid_ar = int(_ss.get("ux_avskrivningstid", ux.get("avskrivningstid_ar", 40)))
+        refi_intervall_ar, refi_multipel = 0, 0.0
+        skattesats_pct = ux["skattesats_pct"]
+        vedlikeholdsinvestering_nok = parse_number(str(_ss.get("ux_vedlikehold_nok", "")), ux.get("vedlikeholdsinvestering_nok_forste_ar", 0.0))
+        vedlikeholdsinvestering_pct_capex = (vedlikeholdsinvestering_nok / capex) if capex else 0.0
+        vedlikeholdsinvestering_indeksering_pct_ar = parse_number(str(_ss.get("ux_vedlikehold_indeks", "")), ux["vedlikeholdsinvestering_indeksering_pct_ar"] * 100) / 100.0
+        holding_years_val = int(ux["holding_years"])
+        terminal_ebitda_multipel = ux["terminal_ebitda_multipel"]
+        st.caption(
+            f"Konsolidert: anlegget (CAPEX {fmt_int(capex)}) legges på oppdretters balanse, finansiert med banklån "
+            f"{fmt_int(banklan_belop_preview)} ({ebitda_multipel:.1f} x SFaaS-kapitalleie) til {bankrente_pct_ar*100:.2f} % "
+            f"over {banklan_ar_val} år + egenkapital {fmt_int(capex - banklan_belop_preview)}. Avskrives lineært over "
+            f"{avskrivningstid_ar} år. Vedlikeholdsinvesteringer {fmt_int(vedlikeholdsinvestering_nok)}/år aktiveres. "
+            "Forutsetningene settes under 'SFaaS oppdrett'."
+        )
 
     hexacage_sublinjer = [
         {"id": "leie_131", "navn": "13.1 Kapitalleie"},
@@ -2336,6 +2465,18 @@ else:
     _event_kr = {"leie_135": desinfeksjon_ukentlig, "leie_132": oppankring_ukentlig}
 fixed_costs_weekly = build_fixed_costs_weekly(cfg, all_weeks_uke_dato, event_based_kr=_event_kr)
 
+# KONSOLIDERT: eierens egne poster (CAPEX, banklån, renter/avdrag,
+# vedlikeholdsinvesteringer, avskrivninger) per uke - legges inn i
+# Konsolidert kontantstrøm, Resultatregnskap og Balanse for oppdretter.
+if konsolidert:
+    cfg.EIER_UKE = build_eier_uke(
+        cfg, all_weeks_uke_dato, capex, banklan_belop_preview, bankrente_pct_ar, int(round(banklan_ar_val * 12)),
+        prosjekt_start_dato, vedlikeholdsinvestering_nok, vedlikeholdsinvestering_indeksering_pct_ar,
+        int(avskrivningstid_ar),
+    )
+else:
+    cfg.EIER_UKE = None
+
 st.subheader("Kontantstrøm")
 if not cfg.SALES_PRICE_KR_PER_KG and not _sales_price_table_runtime:
     st.caption("Ingen salgspris satt i sidepanelet ennå (under 'Salg') - inntektsraden viser 0 inntil den er fylt inn.")
@@ -2647,7 +2788,44 @@ else:  # Batchoversikt
     _batch_default_idx = batch_ids.index(_default_batch) if _default_batch in batch_ids else 0
     valgt_batch = st.selectbox("Velg batch:", options=batch_ids, index=_batch_default_idx, key="cashflow_batch")
     kohort_for_batch = valgt_batch.split("-B")[0]
-    batch_show = cashflow[cashflow["batch_id"].isin([valgt_batch, f"({valgt_batch})"])]
+    # Batchens EGEN ukentlige kontantstrøm: kostnadene fra uke-for-uke-
+    # fordelingen (build_batch_ukentlig_kostnad - smolt etter antall, resten
+    # etter biomasse, KUN mens batchen fortsatt er i tanken) + inntekten i
+    # batchens leveringsuke. Rader fra innsett t.o.m. leveringsuken; etter
+    # levering finnes det ingen rader - det er slik man ser at kostnads-
+    # fordelingen opphører når batchen er solgt.
+    _bk = build_batch_ukentlig_kostnad(cfg, ledger, generations)
+    _bm = build_batch_ukentlig_mengde(cfg, ledger, generations)
+    _bk = _bk[_bk["batch_id"] == valgt_batch].sort_values("uke_idx").reset_index(drop=True)
+    _bm = _bm[_bm["batch_id"] == valgt_batch].sort_values("uke_idx").reset_index(drop=True)
+    _kr_cols = [f"kr_{r['id']}" for r in cfg.RESOURCES]
+    batch_show = _bk[["kohort_id", "batch_id", "uke", "dato"] + _kr_cols].copy()
+    batch_show["fase"] = "Vekst"
+    if len(_bm):
+        batch_show["mengde_for"] = _bm["mengde_for"].values
+    batch_show["kostnad_totalt_kr"] = batch_show[_kr_cols].sum(axis=1)
+    # Inntekt, levert kg og bruttovekst-andel fra kohortens cashflow-rader
+    _cf_b = cashflow[cashflow["batch_id"] == valgt_batch]
+    _lev_uke = _cf_b["uke"].iloc[0] if len(_cf_b) else None
+    batch_show["inntekt_kr"] = 0.0
+    batch_show["kg_wfe_levert"] = 0.0
+    batch_show["kg_solgt"] = 0.0
+    if _lev_uke is not None:
+        _i = batch_show.index[batch_show["uke"] == _lev_uke]
+        if len(_i):
+            batch_show.loc[_i, "inntekt_kr"] = float(_cf_b["inntekt_kr"].iloc[0])
+            batch_show.loc[_i, "kg_wfe_levert"] = float(_cf_b["kg_wfe_levert"].iloc[0])
+            batch_show.loc[_i, "kg_solgt"] = float(_cf_b["kg_solgt"].iloc[0])
+    # Bruttovekst-andel: kohortens ukentlige bruttovekst x batchens biomasseandel
+    # den uken (samme nøkkel som kostnadene 1-12 - fôr er den dominerende).
+    _koh_led = ledger[ledger["kohort_id"] == kohort_for_batch].set_index("uke")
+    _andel = (batch_show["kr_for"] / _koh_led["kr_for"].reindex(batch_show["uke"]).values).fillna(0.0)
+    batch_show["kg_wfe_brutto"] = _koh_led["kg_wfe_brutto"].reindex(batch_show["uke"]).values * _andel.values
+    batch_show["netto_kontantstrom_kr"] = batch_show["inntekt_kr"] - batch_show["kostnad_totalt_kr"]
+    batch_show["akkumulert_kontantstrom_kr"] = batch_show["netto_kontantstrom_kr"].cumsum()
+    batch_show["kg_wfe_levert_akkumulert"] = batch_show["kg_wfe_levert"].cumsum()
+    batch_show["kg_solgt_akkumulert"] = batch_show["kg_solgt"].cumsum()
+    batch_show["kg_wfe_netto_akkumulert"] = batch_show["kg_wfe_brutto"].cumsum()
 
     batch_granularitet = st.selectbox(
         "Vis batchen som:", options=["Uke", "Måned", "År", "Totalt"], index=0,
@@ -2655,7 +2833,10 @@ else:  # Batchoversikt
     )
 
     if batch_granularitet == "Uke":
-        st.caption(f"Viser {valgt_batch} sin egen ukentlige PnL/kontantstrøm, fra innsett til levering.")
+        st.caption(f"Viser {valgt_batch} sin egen ukentlige kontantstrøm fra innsett til levering: smolt (uke 1, "
+                   "etter antall), fôr og øvrige linjer (etter biomasseandel blant batchene som fortsatt er i "
+                   "tanken), inntekt i leveringsuken. Ingen rader etter levering - fordelingen opphører når batchen "
+                   "er solgt. Faste kostnader vises i full verdi for de samme ukene (ikke fordelt).")
         per_kg_args = (batch_show, "uke", None)
     elif batch_granularitet == "Måned":
         st.caption(f"Viser {valgt_batch} sin PnL/kontantstrøm summert per måned.")
@@ -2671,7 +2852,23 @@ else:  # Batchoversikt
         batch_total = summarize_cashflow_by_period(batch_show, "totalt")
         per_kg_args = (batch_total, "periode", None)
 
-
+# ---- SELVE KONTANTSTRØMTABELLEN for valgt visning (uke/kohort/batch) - (kr),
+#      (kr/kg WFE) og (kr/kg HOG) side om side. For Batch-/Kohortoversikt
+#      vises i tillegg de faste kostnadene (13-16) for de samme periodene, i
+#      full verdi (ikke fordelt). Var falt ut av visningen - gjeninnført. ----
+_per_kg_df, _per_kg_col, _per_kg_labels = per_kg_args
+_fixed_for_vis = None
+if visning in ("Batchoversikt", "Kohortoversikt") and len(_per_kg_df):
+    _uker_vis = set(_per_kg_df["uke"]) if "uke" in _per_kg_df.columns else set(
+        (batch_show if visning == "Batchoversikt" else kohort_show)["uke"])
+    _period_vis = {"uke": "uke", "periode": None}[_per_kg_col]
+    if _period_vis is None:
+        _gran = batch_granularitet if visning == "Batchoversikt" else kohort_granularitet
+        _period_vis = {"Måned": "maned", "År": "ar", "Totalt": "totalt"}.get(_gran, "uke")
+    _fixed_for_vis = _fixed_costs_for_periode(fixed_costs_weekly, _uker_vis, _period_vis)
+if len(_per_kg_df):
+    _show_kontantstrom_kombinert(_per_kg_df, _per_kg_col, period_labels=_per_kg_labels,
+                                 hog_faktor=cfg.HOG_FAKTOR, fixed_costs_df=_fixed_for_vis)
 
 if visning == "Batchoversikt":
     with st.expander(f"📈 Isolert utvikling {min(eskalering_ar)}-{max(eskalering_ar)} for {valgt_batch} (hele driften = kun denne batchen, escalert normalt)", expanded=False):
@@ -2897,23 +3094,42 @@ if not any(v for v in cfg.FIXED_COST_KR_PER_UKE.values()):
 # hvilken visning som er valgt under), slik at den faktiske ukentlige bunnen
 # fanges opp presist - en måneds- eller årsvisning kunne skjult det verste
 # punktet midt i perioden. ----
+# ---- OPERASJONELT KAPITALBEHOV, to-trinns (ingen sirkularitet) ----
+# Trinn 1: balansen bygges UTEN operasjonelt EK-innskudd; bunnpunktet i
+# kontantbeholdningen (inkl. kundefordringer/leverandørgjeld, og i
+# Konsolidert også renter/avdrag/vedlikehold/CAPEX/lån) er kapitalbehovet.
+# Trinn 2: beløpet legges inn som innskutt egenkapital + kontanter fra uke 1
+# (cfg.EK_OPERASJONELT_KR), så laveste kontantbeholdning blir eksakt 0.
+# Renter avhenger bare av lånet, ikke av kontantene - så trinn 2 endrer
+# ikke behovet, og det finnes ingen sirkulær referanse.
+matchet_kostnad = build_matchet_kostnad_per_uke(cfg, ledger, generations)
+cfg.EK_OPERASJONELT_KR = 0.0
+_bal_pass1 = build_balanse(
+    cfg, ledger, cashflow, generations, fixed_costs_weekly, matchet_kostnad,
+    cfg.START_ISO_YEAR, cfg.START_ISO_WEEK, kundefrist_uker=2, leverandorfrist_uker=1,
+)
+bunn_idx = _bal_pass1["kontanter"].idxmin()
+bunn_verdi = float(_bal_pass1.loc[bunn_idx, "kontanter"])
+bunn_uke = _bal_pass1.loc[bunn_idx, "uke"]
+ek_operasjonelt_kr = max(0.0, -bunn_verdi)
+cfg.EK_OPERASJONELT_KR = ek_operasjonelt_kr
 kons_uke_for_kapitalbehov = build_konsolidert_kontantstrom(cfg, cashflow, fixed_costs_weekly, "uke")
-bunn_idx = kons_uke_for_kapitalbehov["akkumulert_kontantstrom_konsolidert_kr"].idxmin()
-bunn_verdi = kons_uke_for_kapitalbehov.loc[bunn_idx, "akkumulert_kontantstrom_konsolidert_kr"]
-bunn_uke = kons_uke_for_kapitalbehov.loc[bunn_idx, "periode"]
 bunn_dato = pd.to_datetime(fixed_costs_weekly.set_index("uke").reindex([bunn_uke])["dato"].iloc[0])
 c1, c2 = st.columns(2)
 c1.metric(
     "Operasjonell kapital oppdretter må ha tilgjengelig",
     f"{fmt_int(abs(bunn_verdi))} kr",
-    help="Det STØRSTE akkumulerte kontantunderskuddet gjennom hele simuleringen - altså hvor mye "
-         "kapital som må være tilgjengelig for å dekke driften helt til kontantstrømmen snur og "
-         "akkumulert saldo begynner å bli positiv for godt. Beregnet på ukebasis for presisjon.",
+    help="Bunnpunktet i KONTANTBEHOLDNINGEN (balansen, ukebasis) FØR egenkapitalinnskuddet - dvs. hvor "
+         "mye egenkapital som må skytes inn i uke 1 for at kontantene aldri skal gå under null. Inkluderer "
+         "betalingsbetingelser (kundefordringer/leverandørgjeld) og, i Konsolidert, renter/avdrag/"
+         "vedlikehold. Beløpet legges automatisk inn som innskutt egenkapital + kontanter i balansen og "
+         "som 'Egenkapitalinnskudd, operasjonelt' i første uke i Konsolidert kontantstrøm - se 'Investert kapital'.",
 )
 c2.metric(
     "Inntreffer i uke",
     f"{bunn_uke} ({bunn_dato.strftime('%b %Y')})",
-    help="Uken der akkumulert kontantstrøm (konsolidert) når sitt laveste punkt.",
+    help="Uken der kontantbeholdningen (før innskuddet) når sitt laveste punkt - etter innskuddet er "
+         "kontantene eksakt 0 denne uken.",
 )
 
 kons_visning = st.selectbox(
@@ -2928,7 +3144,8 @@ kons_periode_raw_order = kons["periode"].tolist()  # RÅ periode-rekkefølge, F�
                                                      # batch-nedtrekket (_render_expandable_kontantstrom).
 
 kons_period_labels = kons["periode"].apply(month_label) if kons_period == "maned" else None
-kons_row_labels = {"periode": "Periode", "inntekt_kr": "Inntekt (kr)", "inntektsindeks": "Inntektsindeks"}
+kons_row_labels = {"periode": "Periode", "inntekt_kr": "Inntekt (kr)", "inntektsindeks": "Inntektsindeks",
+                   "ek_operasjonelt_kr": "Egenkapitalinnskudd, operasjonelt kapitalbehov (kr)"}
 for r in cfg.RESOURCES:
     kons_row_labels[f"kr_{r['id']}"] = f"{r['navn']} (kr)"
 kons_row_labels["kostnad_variabel_totalt_kr"] = "Variabel kostnad totalt (kr)"
@@ -2939,6 +3156,10 @@ for sl in cfg.HEXACAGE_LEIE_SUBLINJER:
 for fc in cfg.FIXED_COSTS:
     kons_row_labels[f"kr_{fc['id']}"] = f"{fc['navn']} (kr)"
 kons_row_labels.update({
+    "capex_kr": "Investering i anlegg, CAPEX (kr)", "vedlikehold_kr": "Vedlikeholdsinvesteringer, aktivert (kr)",
+    "renter_kr": "Renter banklån (kr)", "avdrag_kr": "Avdrag banklån (kr)",
+    "lan_opptak_kr": "Opptak banklån (kr)", "ek_innskudd_kr": "Egenkapitalinnskudd (kr)",
+    "eier_netto_kr": "Netto eierposter: lån + EK - CAPEX - vedlikehold - renter - avdrag (kr)",
     "kr_faste_totalt": "Faste kostnader totalt (kr)",
     "kostnad_totalt_konsolidert_kr": "Kostnad totalt, konsolidert (kr)",
     "kostnadsindeks": "Kostnadsindeks",
@@ -3046,7 +3267,6 @@ resultat_visning = st.selectbox(
     key="resultat_visning",
 )
 resultat_period = {"Ukeoversikt": "uke", "Månedsoversikt": "maned", "Årsoversikt": "ar"}[resultat_visning]
-matchet_kostnad = build_matchet_kostnad_per_uke(cfg, ledger, generations)
 resultat = build_resultatregnskap(
     cfg, cashflow, fixed_costs_weekly, matchet_kostnad,
     cfg.START_ISO_YEAR, cfg.START_ISO_WEEK, resultat_period,
@@ -3182,21 +3402,52 @@ else:
         balanse_vist["periode"] = pd.to_datetime(balanse_vist["dato"]).dt.strftime("%Y-%m")
     else:
         balanse_vist["periode"] = pd.to_datetime(balanse_vist["dato"]).dt.isocalendar().year
-    balanse_kolonner = ["kontanter", "kundefordringer", "biologisk_eiendel", "leverandorgjeld",
-                         "opptjent_egenkapital", "sum_eiendeler",
+    balanse_kolonner = ["kontanter", "kundefordringer", "biologisk_eiendel", "anlegg", "leverandorgjeld",
+                         "banklan", "innskutt_egenkapital", "opptjent_egenkapital", "sum_eiendeler",
                          "sum_gjeld_og_egenkapital", "differanse"]
+    if not konsolidert:
+        # SFaaS: ingen anlegg/banklån hos oppdretter - men innskutt egenkapital
+        # (det operasjonelle EK-innskuddet) vises alltid.
+        balanse_kolonner = [c for c in balanse_kolonner if c not in ("anlegg", "banklan")]
     balanse_vist = balanse_vist.groupby("periode", sort=True)[balanse_kolonner].last().reset_index()
     balanse_periode_labels = balanse_vist["periode"].apply(month_label) if balanse_gruppe == "maned" else None
 
+# ---- Normal balanseoppstilling: anleggsmidler, omløpsmidler, sum eiendeler;
+#      egenkapital (innskutt + opptjent), sum EK; gjeld (langsiktig + kortsiktig),
+#      sum gjeld; sum gjeld og egenkapital. Delsummer regnes her fra kolonnene. ----
+_has = lambda c: c in balanse_vist.columns
+balanse_vist["sum_anleggsmidler"] = balanse_vist["anlegg"] if _has("anlegg") else 0.0
+balanse_vist["sum_omlopsmidler"] = balanse_vist["kontanter"] + balanse_vist["kundefordringer"] + balanse_vist["biologisk_eiendel"]
+balanse_vist["sum_egenkapital"] = (balanse_vist["innskutt_egenkapital"] if _has("innskutt_egenkapital") else 0.0) + balanse_vist["opptjent_egenkapital"]
+balanse_vist["sum_langsiktig_gjeld"] = balanse_vist["banklan"] if _has("banklan") else 0.0
+balanse_vist["sum_kortsiktig_gjeld"] = balanse_vist["leverandorgjeld"]
+balanse_vist["sum_gjeld"] = balanse_vist["sum_langsiktig_gjeld"] + balanse_vist["sum_kortsiktig_gjeld"]
+_bal_rekkef = (["periode"]
+               + (["anlegg"] if _has("anlegg") else []) + ["sum_anleggsmidler",
+               "kontanter", "kundefordringer", "biologisk_eiendel", "sum_omlopsmidler", "sum_eiendeler"]
+               + (["innskutt_egenkapital"] if _has("innskutt_egenkapital") else []) + ["opptjent_egenkapital", "sum_egenkapital"]
+               + (["banklan"] if _has("banklan") else []) + ["sum_langsiktig_gjeld",
+               "leverandorgjeld", "sum_kortsiktig_gjeld", "sum_gjeld", "sum_gjeld_og_egenkapital", "differanse"])
+balanse_vist = balanse_vist[[c for c in _bal_rekkef if c in balanse_vist.columns]]
+
 balanse_row_labels = {
     "periode": "Periode",
+    "anlegg": "Anlegg (Big Dipper), bokført verdi (kr)",
+    "sum_anleggsmidler": "Sum anleggsmidler (kr)",
     "kontanter": "Kontanter (kr)",
     "kundefordringer": "Kundefordringer (kr)",
     "biologisk_eiendel": "Biologisk eiendel (kr)",
-    "sum_eiendeler": "Sum eiendeler (kr)",
-    "leverandorgjeld": "Leverandørgjeld (kr)",
+    "sum_omlopsmidler": "Sum omløpsmidler (kr)",
+    "sum_eiendeler": "SUM EIENDELER (kr)",
+    "innskutt_egenkapital": "Innskutt egenkapital (kr)",
     "opptjent_egenkapital": "Opptjent egenkapital (kr)",
-    "sum_gjeld_og_egenkapital": "Sum gjeld og egenkapital (kr)",
+    "sum_egenkapital": "Sum egenkapital (kr)",
+    "banklan": "Banklån (kr)",
+    "sum_langsiktig_gjeld": "Sum langsiktig gjeld (kr)",
+    "leverandorgjeld": "Leverandørgjeld (kr)",
+    "sum_kortsiktig_gjeld": "Sum kortsiktig gjeld (kr)",
+    "sum_gjeld": "Sum gjeld (kr)",
+    "sum_gjeld_og_egenkapital": "SUM GJELD OG EGENKAPITAL (kr)",
     "differanse": "Differanse (skal være 0)",
 }
 balanse_formatted = with_thousands(
@@ -3232,234 +3483,389 @@ st.caption(
 )
 _render_expandable_kontantstrom(
     balanse_wide, highlight_groups=[
-        {"rows": ["Sum eiendeler (kr)", "Sum gjeld og egenkapital (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
+        {"rows": ["Sum anleggsmidler (kr)", "Sum omløpsmidler (kr)", "Sum egenkapital (kr)",
+                  "Sum langsiktig gjeld (kr)", "Sum kortsiktig gjeld (kr)", "Sum gjeld (kr)"], "bg": "#eef1f6", "text": "#5b6b82"},
+        {"rows": ["SUM EIENDELER (kr)", "SUM GJELD OG EGENKAPITAL (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
         {"rows": ["Differanse (skal være 0)"], "bg": "#fdeaea", "text": "#a33a3a"},
     ],
     felt_bredde_px=KONSOLIDERT_FELT_BREDDE_PX, kol_bredde_px=KONSOLIDERT_KOL_BREDDE_PX,
     expandable=balanse_expandable, breakdown=balanse_breakdown, periode_raw_order=balanse_periode_raw_order,
 )
 
-# ============================================================================
-# LØNNSOMHET - UTLEIER (Aqualoop/Big Dipper)
-# ============================================================================
-st.subheader("Big Dipper SFaaS (utleier) - Resultatregnskap, kontantstrøm og balanse")
-st.caption(
-    "Egne regnskaper for UTLEIER (Aqualoop, eier av anlegget) - atskilt fra oppdretters oppstillinger over. "
-    "Leieinntekter = '13. Leie av Big Dipper-anlegg' (uten 13.2 Oppankring, som er et utlån til kunde: renter = "
-    "finansinntekt, avdrag = nedbetaling av utlånet). Driftskostnader = 13.3-13.10 (kost-gjennomfakturering uten "
-    "påslag), så EBITDA = Kapitalleien 13.1. Anlegget avskrives lineært over valgt antall år (sidepanelet); "
-    "vedlikeholdsinvesteringer aktiveres og avskrives likt. Skatt med fremførbart underskudd. All fri kontantstrøm "
-    "deles ut til eier hvert år (negativ = eier skyter inn) - kontantbeholdningen holdes derfor på 0, og "
-    "'Kontantstrøm til eier' er nøyaktig det IRR-beregningen under bruker. Banklån, refinansiering, skattesats "
-    "og vedlikehold settes i sidepanelet under 'Lønnsomhet - Utleier - forutsetninger'."
-)
-
-utleier_years = sorted({pd.to_datetime(d).year for _, d in all_weeks_uke_dato})
-utleier_ar_per_uke = {u: pd.to_datetime(d).year for u, d in all_weeks_uke_dato}
-
-# VIKTIG: bruker ISOCALENDAR-år (.dt.isocalendar().year), IKKE vanlig
-# .dt.year - EKSAKT samme årsinndeling som build_konsolidert_kontantstrom()
-# bruker for "13.x"-radene sine ("ar"-visning). Et par uker i året kan i
-# prinsippet tilhøre et ANNET ISO-år enn sitt eget kalenderår (rundt
-# årsskiftet) - bruker man vanlig .dt.year i stedet, kan en uke havne i
-# feil årskolonne sammenlignet med Konsolidert kontantstrøm, og gi et
-# lite, forvirrende avvik akkurat ved årsskiftet.
-_fastkost_med_ar = fixed_costs_weekly.copy()
-_fastkost_med_ar["ar"] = pd.to_datetime(_fastkost_med_ar["dato"]).dt.isocalendar().year
-utleier_kapitalleie_per_ar = _fastkost_med_ar.groupby("ar")["kr_leie_131"].sum().to_dict()
-
-utleier_driftskostnader_ider = ["leie_13_teknisk", "leie_133", "leie_134", "leie_136", "leie_137", "leie_138", "leie_139"]
-utleier_driftskostnader_per_ar = (
-    _fastkost_med_ar.groupby("ar")[[f"kr_{i}" for i in utleier_driftskostnader_ider]].sum().sum(axis=1).to_dict()
-)
-
-utleier_desinfeksjon_per_ar = {y: 0.0 for y in utleier_years}
-for uke, belop in desinfeksjon_ukentlig.items():
-    if uke in utleier_ar_per_uke:
-        utleier_desinfeksjon_per_ar[utleier_ar_per_uke[uke]] += belop
-
-# "13.2 Oppankring" (Finansinntekter/Avdrag fra kunde): MÅ hentes fra
-# renter_avdrag_per_uke (SAMME ukentlige kilde som Konsolidert kontantstrøm
-# sin "13.2 Oppankring"-rad bruker), aggregert med SAMME isocalendar-år-
-# metode - IKKE regnes på nytt med en egen, måned-basert årsinndeling (det
-# ga tidligere et lite, reelt avvik mot hva som faktisk belastes kunden
-# samme år, siden uke-for-uke og måned-for-måned rundes ulikt ved
-# årsskiftet).
-_renter_avdrag_med_ar = renter_avdrag_per_uke.copy()
-_renter_avdrag_med_ar["dato"] = _renter_avdrag_med_ar["uke"].map(dict(all_weeks_uke_dato))
-_renter_avdrag_med_ar["ar"] = pd.to_datetime(_renter_avdrag_med_ar["dato"]).dt.isocalendar().year
-utleier_oppankring_renter_per_ar = _renter_avdrag_med_ar.groupby("ar")["renter_uke"].sum().to_dict()
-utleier_oppankring_avdrag_per_ar = _renter_avdrag_med_ar.groupby("ar")["avdrag_uke"].sum().to_dict()
-
-utleier_regnskap = build_utleier_regnskap(
-    utleier_years, capex, kapitalleie_ar, utleier_kapitalleie_per_ar,
-    utleier_driftskostnader_per_ar, utleier_desinfeksjon_per_ar,
-    oppankring_inv, utleier_oppankring_renter_per_ar, utleier_oppankring_avdrag_per_ar,
-    ebitda_multipel, bankrente_pct_ar, banklan_ar_val, skattesats_pct, vedlikeholdsinvestering_pct_capex,
-    vedlikeholdsinvestering_indeksering_pct_ar, prosjekt_start_dato,
-    refi_intervall_ar=refi_intervall_ar, refi_multipel=refi_multipel, avskrivningstid_ar=int(avskrivningstid_ar),
-)
-utleier_lonnsomhet = utleier_regnskap["kombinert"]   # grunnlag for IRR (ebitda, netto kontantstrøm til eier, banklånsaldo)
-
-
-def _utleier_tabell(df, labels, highlight):
-    _f = with_thousands(df, int_cols=[], float_cols=[c for c in df.columns if c != "periode"], float_decimals=0)
-    _w = _f.set_index("periode").T
-    _w.index.name = "Felt"
-    _w = _w.rename(index=labels)
-    _render_table(_w, highlight_groups=highlight,
-                  fixed_label_width_px=KONSOLIDERT_FELT_BREDDE_PX, fixed_data_col_width_px=KONSOLIDERT_KOL_BREDDE_PX)
-
-
-st.markdown("**Resultatregnskap - utleier**")
-_utleier_tabell(utleier_regnskap["resultat"], {
-    "leieinntekter_kr": "Leieinntekter 13.1-13.10 (kr)", "driftskostnader_kr": "Driftskostnader 13.3-13.10 (kr)",
-    "ebitda_kr": "EBITDA (= 13.1 Kapitalleie) (kr)", "avskrivninger_kr": "Avskrivninger (kr)", "ebit_kr": "EBIT (kr)",
-    "finanskostnader_kr": "Finanskostnader, banklån (kr)", "finansinntekter_kr": "Finansinntekter, oppankring (kr)",
-    "resultat_for_skatt_kr": "Resultat før skatt (kr)", "skatt_kr": "Skatt (kr)", "arsresultat_kr": "Årsresultat (kr)",
-}, [
-    {"rows": ["EBITDA (= 13.1 Kapitalleie) (kr)", "EBIT (kr)", "Resultat før skatt (kr)"], "bg": "#fbf3e6", "text": "#9a6b2a"},
-    {"rows": ["Årsresultat (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
-])
-
-st.markdown("**Kontantstrøm - utleier (indirekte metode)**")
-st.caption("Negativt fortegn = utbetaling. Utbytte/innskudd = hele den frie kontantstrømmen, så 'Endring kontanter' er alltid 0.")
-_utleier_tabell(utleier_regnskap["kontantstrom"], {
-    "arsresultat_kr": "Årsresultat (kr)", "avskrivninger_kr": "+ Avskrivninger (kr)",
-    "kfo_kr": "Kontantstrøm fra drift (kr)",
-    "investering_capex_kr": "Investering i anlegg, CAPEX (kr)", "vedlikeholdsinvestering_kr": "Vedlikeholdsinvesteringer (kr)",
-    "kfi_kr": "Kontantstrøm fra investering (kr)",
-    "utlan_kunde_kr": "Utlån til kunde, oppankring (kr)", "avdrag_kunde_kr": "Avdrag fra kunde, oppankring (kr)",
-    "banklan_opptak_kr": "Opptak banklån (kr)", "refinansiering_kr": "Refinansiering, netto proveny (kr)",
-    "avdrag_bank_kr": "Avdrag banklån (kr)", "egenkapitalinnskudd_kr": "Egenkapitalinnskudd ved oppstart (kr)",
-    "fri_kontantstrom_kr": "Fri kontantstrøm før utbytte (kr)", "utbytte_kr": "Utbytte til eier (-) / innskudd fra eier (+) (kr)",
-    "kff_kr": "Kontantstrøm fra finansiering (kr)", "endring_kontanter_kr": "Endring kontanter (kr)",
-    "kontantstrom_til_eier_kr": "Kontantstrøm til eier (IRR-grunnlag) (kr)",
-}, [
-    {"rows": ["Kontantstrøm fra drift (kr)", "Kontantstrøm fra investering (kr)", "Kontantstrøm fra finansiering (kr)"], "bg": "#fbf3e6", "text": "#9a6b2a"},
-    {"rows": ["Fri kontantstrøm før utbytte (kr)", "Kontantstrøm til eier (IRR-grunnlag) (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
-])
-
-st.markdown("**Balanse - utleier (31.12)**")
-_utleier_tabell(utleier_regnskap["balanse"], {
-    "anlegg_kostpris_kr": "Anlegg, kostpris inkl. vedlikeholdsinvesteringer (kr)", "akk_avskrivninger_kr": "Akkumulerte avskrivninger (kr)",
-    "anlegg_bokfort_kr": "Anlegg, bokført verdi (kr)", "utlan_kunde_kr": "Utlån til kunde, oppankring (kr)",
-    "kontanter_kr": "Kontanter (kr)", "sum_eiendeler_kr": "Sum eiendeler (kr)",
-    "banklan_kr": "Banklån (kr)", "innskutt_egenkapital_kr": "Innskutt egenkapital (kr)",
-    "opptjent_egenkapital_kr": "Opptjent egenkapital etter utbytte (kr)", "sum_egenkapital_kr": "Sum egenkapital (kr)",
-    "sum_gjeld_egenkapital_kr": "Sum gjeld og egenkapital (kr)", "differanse_kr": "Differanse (skal være 0)",
-}, [
-    {"rows": ["Sum eiendeler (kr)", "Sum gjeld og egenkapital (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
-    {"rows": ["Differanse (skal være 0)"], "bg": "#fdecea", "text": "#a33"},
-])
-
 # ----------------------------------------------------------------------
-# NYBYGGPARITET - guide for ny TC. Nybyggpris indeksert fra startåret,
-# EBITDA-krav = yield x nybyggpris, guide-TC = EBITDA-krav + årets opex i
-# leien. Sammenlignes med faktisk kapitalleie (13.1) og faktisk leie.
+# INVESTERT KAPITAL - sources & uses for oppdretter (NOS). Uses: investering
+# i Big Dipper (kun Konsolidert) + operasjonelt kapitalbehov (bunnpunktet i
+# akkumulert driftskontantstrøm). Sources: banklån (kun Konsolidert) +
+# egenkapital - det operasjonelle kapitalbehovet dekkes med egenkapital.
 # ----------------------------------------------------------------------
-st.subheader("Nybyggparitet - guide for ny TC på riggen")
+st.subheader("Investert kapital - sources & uses (oppdretter)")
+_ik_capex = capex if konsolidert else 0.0
+_ik_lan = banklan_belop_preview if konsolidert else 0.0
+_ik_oper = ek_operasjonelt_kr
+_ik_ek_inv = max(0.0, _ik_capex - _ik_lan)
+_ik_ek_oper = _ik_oper
+_ik_uses = _ik_capex + _ik_oper
+_ik_sources = _ik_lan + _ik_ek_inv + _ik_ek_oper
+_ik_rows = [
+    ("USES", "", ""),
+    ("Investering Big Dipper (CAPEX)", _ik_capex, _ik_capex / _ik_uses if _ik_uses else 0.0),
+    (f"Operasjonelt kapitalbehov, på det meste (uke {bunn_uke}, {bunn_dato.strftime('%b %Y')})", _ik_oper, _ik_oper / _ik_uses if _ik_uses else 0.0),
+    ("Sum uses", _ik_uses, 1.0 if _ik_uses else 0.0),
+    ("SOURCES", "", ""),
+    ("Banklån", _ik_lan, _ik_lan / _ik_sources if _ik_sources else 0.0),
+    ("Egenkapital - investering", _ik_ek_inv, _ik_ek_inv / _ik_sources if _ik_sources else 0.0),
+    ("Egenkapital - operasjonelt kapitalbehov", _ik_ek_oper, _ik_ek_oper / _ik_sources if _ik_sources else 0.0),
+    ("Sum sources", _ik_sources, 1.0 if _ik_sources else 0.0),
+    ("Herav egenkapital totalt", _ik_ek_inv + _ik_ek_oper, (_ik_ek_inv + _ik_ek_oper) / _ik_sources if _ik_sources else 0.0),
+]
+_ik_df = pd.DataFrame({
+    "Felt": [r[0] for r in _ik_rows],
+    "NOK": [fmt_int(r[1]) if r[1] != "" else "" for r in _ik_rows],
+    "Andel (%)": [fmt_float(r[2] * 100, 1) if r[2] != "" else "" for r in _ik_rows],
+}).set_index("Felt")
 st.caption(
-    f"Nybyggpris = {fmt_int(capex)} x (1 + {byggeindeks_pct_ar*100:.1f} %) per år fra {int(cfg.START_ISO_YEAR)}. "
-    f"EBITDA-krav = nybyggpris x {ebitda_yield_pct*100:.1f} %. Guide-TC = EBITDA-krav + årets driftskostnader i leien "
-    "(13.3-13.10, gjennomfakturert). 'Tilsvarer kapitalleie-sats' er EBITDA-kravet delt på opprinnelig CAPEX - det "
-    "satsen som ville gitt full nybyggparitet. Reforhandling velges i sidepanelet (år + andel av gapet) - de "
-    "valgte nye satsene vises nederst i tabellen. Avvik = guide-TC minus faktisk leie (positivt = riggen er "
-    "underpriset mot nybygg). EBITDA-yield og byggeindeks endres i sidepanelet under 13.1 Kapitalleie."
+    ("Konsolidert: NOS eier Big Dipper selv - investeringen finansieres med banklån + egenkapital, og det "
+     "operasjonelle kapitalbehovet (driftens største akkumulerte underskudd) dekkes med egenkapital."
+     if konsolidert else
+     "SFaaS oppdrett: NOS leier anlegget (ingen CAPEX på egen bok) - investert kapital er kun det "
+     "operasjonelle kapitalbehovet (driftens største akkumulerte underskudd), dekket med egenkapital. "
+     "Utleiers investering og finansiering vises i utleier-seksjonen under.")
 )
-_np_rows = {}
-_np_ar = [y for y in utleier_years if y < int(cfg.START_ISO_YEAR) + int(cfg.N_YEARS_TO_RUN)]
-_kg_solgt_per_ar = summarize_cashflow_by_period(cashflow, "ar").set_index("periode")["kg_solgt"].to_dict() if len(cashflow) else {}
-_leie_tot_per_ar = _fastkost_med_ar.groupby("ar")["kr_leie_anlegg"].sum().to_dict()
-for y in _np_ar:
-    _nyb = capex * (1 + byggeindeks_pct_ar) ** (y - int(cfg.START_ISO_YEAR))
-    _krav = _nyb * ebitda_yield_pct
-    _opex = utleier_driftskostnader_per_ar.get(y, 0.0) + utleier_desinfeksjon_per_ar.get(y, 0.0)
-    _guide = _krav + _opex
-    _fakt_131 = utleier_kapitalleie_per_ar.get(y, 0.0)
-    _fakt_leie = _leie_tot_per_ar.get(y, 0.0)
-    _kg = _kg_solgt_per_ar.get(y, 0.0)
-    _rf_y = next((r for r in kapitalleie_reprising if r["ar"] == y), None)
-    _np_rows[y] = {
-        "Nybyggpris, indeksert (kr)": fmt_int(_nyb),
-        "EBITDA-yield, valgt (%)": fmt_float(ebitda_yield_pct * 100, 1),
-        "EBITDA-krav = yield x nybyggpris (kr)": fmt_int(_krav),
-        "Tilsvarer kapitalleie-sats på opprinnelig CAPEX (%)": fmt_float(_krav / capex * 100, 1) if capex else "",
-        "Årets driftskostnader i leien (kr)": fmt_int(_opex),
-        "Guide-TC = EBITDA-krav + opex (kr)": fmt_int(_guide),
-        "Faktisk kapitalleie 13.1 (kr)": fmt_int(_fakt_131),
-        "Faktisk leie totalt 13.1-13.10 (kr)": fmt_int(_fakt_leie),
-        "Avvik guide-TC - faktisk leie (kr)": fmt_int(_guide - _fakt_leie),
-        f"Guide-TC per solgt kg ({solgt_enhet})": fmt_float(_guide / _kg, 2) if _kg else "",
-        f"Faktisk leie per solgt kg ({solgt_enhet})": fmt_float(_fakt_leie / _kg, 2) if _kg else "",
-        "Reforhandling: andel av gap hentet inn (%)": fmt_float(_rf_y["andel"] * 100, 0) if _rf_y else "",
-        "Reforhandling: ny kapitalleie 13.1 (kr)": fmt_int(_rf_y["ny_131"]) if _rf_y else "",
-        "Reforhandling: ny kapitalleie-sats (%)": fmt_float(_rf_y["sats_pct"] * 100, 2) if _rf_y else "",
-    }
-_np_wide = pd.DataFrame(_np_rows)
-_np_wide.index.name = "Felt"
-_render_table(_np_wide, highlight_groups=[
-    {"rows": ["Guide-TC = EBITDA-krav + opex (kr)", "Tilsvarer kapitalleie-sats på opprinnelig CAPEX (%)"], "bg": "#eef7ee", "text": "#3d7a3d"},
-    {"rows": ["Avvik guide-TC - faktisk leie (kr)"], "bg": "#f3eef6", "text": "#6b4f82"},
-    {"rows": [f"Guide-TC per solgt kg ({solgt_enhet})", f"Faktisk leie per solgt kg ({solgt_enhet})"], "bg": "#fbf3e6", "text": "#9a6b2a"},
-    {"rows": ["Reforhandling: andel av gap hentet inn (%)", "Reforhandling: ny kapitalleie 13.1 (kr)",
-              "Reforhandling: ny kapitalleie-sats (%)"], "bg": "#eef1f6", "text": "#5b6b82"},
-], fixed_label_width_px=KONSOLIDERT_FELT_BREDDE_PX, fixed_data_col_width_px=KONSOLIDERT_KOL_BREDDE_PX)
-if kapitalleie_reprising:
-    st.caption("Reforhandlinger valgt i sidepanelet (13.1 Kapitalleie): " + "; ".join(
-        f"{r['ar']}: {fmt_int(r['gammel_131'])} → {fmt_int(r['ny_131'])} kr ({r['andel']*100:.0f} % av gapet til "
-        f"{fmt_int(r['krav_131'])}), ny sats {r['sats_pct']*100:.2f} %" for r in kapitalleie_reprising))
+_render_table(_ik_df, highlight_groups=[
+    {"rows": ["USES", "SOURCES"], "bg": "#eef1f6", "text": "#5b6b82"},
+    {"rows": ["Sum uses", "Sum sources"], "bg": "#eef7ee", "text": "#3d7a3d"},
+    {"rows": ["Herav egenkapital totalt"], "bg": "#fbf3e6", "text": "#9a6b2a"},
+], fixed_label_width_px=KONSOLIDERT_FELT_BREDDE_PX + 160, fixed_data_col_width_px=KONSOLIDERT_KOL_BREDDE_PX)
 
-if _vis_irr:
+# ---- Tilbakebetaling av egenkapital - oppdretter: kontantbeholdningen i
+#      balansen (ingen utbytte betales, så kontanter = det eier kan ta ut)
+#      mot innskutt egenkapital. Månedlig (siste uke i måneden). ----
+st.markdown("**Akkumulert kontantstrøm til egenkapital - oppdretter (månedlig)**")
+st.caption(
+    "Kontanter i balansen (månedens slutt) = akkumulert kontantstrøm etter drift, betalingsbetingelser"
+    + (", renter, avdrag, vedlikehold og investering" if konsolidert else "")
+    + " - ingen utbytte er tatt ut, så dette er det eier kan hente tilbake. Stiplede linjer = innskutt "
+    "egenkapital iht. Investert kapital over; markørene viser første måned der egenkapitalen er tilbakebetalt."
+)
+_bal_m = balanse.copy()
+_bal_m["_d"] = pd.to_datetime(_bal_m["dato"]) + pd.Timedelta(days=3)
+_bal_m["_ym"] = _bal_m["_d"].dt.to_period("M")
+_bal_m = _bal_m.groupby("_ym").last()
+_op_dates = [pd.Timestamp(str(ym)).to_pydatetime() for ym in _bal_m.index]
+_op_terskler = [("Operasjonell egenkapital", _ik_ek_oper)]
+if konsolidert:
+    _op_terskler.append(("All innskutt egenkapital (CAPEX + operasjonell)", _ik_ek_inv + _ik_ek_oper))
+_ek_tilbakebetaling_graf(_op_dates, list(_bal_m["kontanter"].values), _op_terskler,
+                         "Oppdretter (NOS) - kontanter i balansen mot innskutt egenkapital", "Kontanter i balansen (MNOK)")
+
+if not konsolidert:
+    # (Skjules i "Konsolidert"-visningen - der er kapitalleien 0 og det finnes ingen utleier.)
     # ============================================================================
-    # IRR - UTLEIERS EGENKAPITAL, MED TERMINALVERDI VED EXIT
+    # LØNNSOMHET - UTLEIER (Aqualoop/Big Dipper)
     # ============================================================================
-    st.subheader(f"IRR - Utleiers egenkapital (eiertid {holding_years_val} år, terminalverdi år {holding_years_val})")
+    st.subheader("Big Dipper SFaaS (utleier) - Resultatregnskap, kontantstrøm og balanse")
     st.caption(
-        f"Internrente på UTLEIERS EGENKAPITAL i utleievirksomheten (ikke i selve oppdretts-"
-        f"virksomheten) over {holding_years_val} år. Egenkapitalinnskudd i år 0 = CAPEX minus "
-        f"utleiers eget banklån (lånefinansiert del). Årlige kontantstrømmer år 1-{holding_years_val} "
-        f"er 'Netto kontantstrøm til eier' fra tabellen over. I år {holding_years_val} legges det i "
-        f"tillegg til en TERMINALVERDI: {terminal_ebitda_multipel:.1f}x EBITDA året ETTER "
-        f"(fremadskuende multippel - en kjøper betaler for neste års forventede inntjening, ikke "
-        f"fjorårets), minus utleiers gjenværende banklånsgjeld på det tidspunktet (en kjøper "
-        f"overtar normalt virksomheten gjeldfri, så selger må dekke inn resten av lånet fra "
-        f"salgssummen for å finne hva egenkapitalen faktisk er verdt)."
+        "Egne regnskaper for UTLEIER (Aqualoop, eier av anlegget) - atskilt fra oppdretters oppstillinger over. "
+        "Leieinntekter = '13. Leie av Big Dipper-anlegg' (uten 13.2 Oppankring, som er et utlån til kunde: renter = "
+        "finansinntekt, avdrag = nedbetaling av utlånet). Driftskostnader = 13.3-13.10 (kost-gjennomfakturering uten "
+        "påslag), så EBITDA = Kapitalleien 13.1. Anlegget avskrives lineært over valgt antall år (sidepanelet); "
+        "vedlikeholdsinvesteringer aktiveres og avskrives likt. Skatt med fremførbart underskudd. All fri kontantstrøm "
+        "deles ut til eier hvert år (negativ = eier skyter inn) - kontantbeholdningen holdes derfor på 0, og "
+        "'Kontantstrøm til eier' er nøyaktig det IRR-beregningen under bruker. Banklån, refinansiering, skattesats "
+        "og vedlikehold settes i sidepanelet under 'Lønnsomhet - Utleier - forutsetninger'."
     )
 
-    irr_resultat = build_utleier_irr(
-        utleier_lonnsomhet, capex, utleier_regnskap["banklan_belop_kr"], bankrente_pct_ar,
-        int(round(banklan_ar_val * 12)), terminal_ebitda_multipel, int(holding_years_val),
+    utleier_years = sorted({pd.to_datetime(d).year for _, d in all_weeks_uke_dato})
+    utleier_ar_per_uke = {u: pd.to_datetime(d).year for u, d in all_weeks_uke_dato}
+
+    # VIKTIG: bruker ISOCALENDAR-år (.dt.isocalendar().year), IKKE vanlig
+    # .dt.year - EKSAKT samme årsinndeling som build_konsolidert_kontantstrom()
+    # bruker for "13.x"-radene sine ("ar"-visning). Et par uker i året kan i
+    # prinsippet tilhøre et ANNET ISO-år enn sitt eget kalenderår (rundt
+    # årsskiftet) - bruker man vanlig .dt.year i stedet, kan en uke havne i
+    # feil årskolonne sammenlignet med Konsolidert kontantstrøm, og gi et
+    # lite, forvirrende avvik akkurat ved årsskiftet.
+    _fastkost_med_ar = fixed_costs_weekly.copy()
+    _fastkost_med_ar["ar"] = pd.to_datetime(_fastkost_med_ar["dato"]).dt.isocalendar().year
+    utleier_kapitalleie_per_ar = _fastkost_med_ar.groupby("ar")["kr_leie_131"].sum().to_dict()
+
+    utleier_driftskostnader_ider = ["leie_13_teknisk", "leie_133", "leie_134", "leie_136", "leie_137", "leie_138", "leie_139"]
+    utleier_driftskostnader_per_ar = (
+        _fastkost_med_ar.groupby("ar")[[f"kr_{i}" for i in utleier_driftskostnader_ider]].sum().sum(axis=1).to_dict()
     )
 
-    if irr_resultat["irr"] is None:
-        st.warning(
-            "Fant ingen IRR-løsning for denne kontantstrømmen (ingen fortegnsskifte i det "
-            "søkte rente-intervallet -99 % til 1000 %) - sjekk om forutsetningene gir en "
-            "urealistisk kontantstrøm (f.eks. terminalverdi lavere enn gjenværende gjeld)."
-        )
-    else:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("IRR", f"{irr_resultat['irr']*100:.1f} %")
-        c2.metric("Egenkapitalinnskudd (år 0)", f"{fmt_int(irr_resultat['egenkapital_innskudd_kr'])} kr")
-        _exit_ar = irr_resultat['terminal_ar'] - 1
-        c3.metric(f"Terminalverdi (EV ved exit, utgangen av år {holding_years_val} = {_exit_ar})",
-                  f"{fmt_int(irr_resultat['terminal_ev_kr'])} kr")
-        c4.metric(f"Terminal egenkapitalverdi", f"{fmt_int(irr_resultat['terminal_egenkapital_kr'])} kr")
+    utleier_desinfeksjon_per_ar = {y: 0.0 for y in utleier_years}
+    for uke, belop in desinfeksjon_ukentlig.items():
+        if uke in utleier_ar_per_uke:
+            utleier_desinfeksjon_per_ar[utleier_ar_per_uke[uke]] += belop
+
+    # "13.2 Oppankring" (Finansinntekter/Avdrag fra kunde): MÅ hentes fra
+    # renter_avdrag_per_uke (SAMME ukentlige kilde som Konsolidert kontantstrøm
+    # sin "13.2 Oppankring"-rad bruker), aggregert med SAMME isocalendar-år-
+    # metode - IKKE regnes på nytt med en egen, måned-basert årsinndeling (det
+    # ga tidligere et lite, reelt avvik mot hva som faktisk belastes kunden
+    # samme år, siden uke-for-uke og måned-for-måned rundes ulikt ved
+    # årsskiftet).
+    _renter_avdrag_med_ar = renter_avdrag_per_uke.copy()
+    _renter_avdrag_med_ar["dato"] = _renter_avdrag_med_ar["uke"].map(dict(all_weeks_uke_dato))
+    _renter_avdrag_med_ar["ar"] = pd.to_datetime(_renter_avdrag_med_ar["dato"]).dt.isocalendar().year
+    utleier_oppankring_renter_per_ar = _renter_avdrag_med_ar.groupby("ar")["renter_uke"].sum().to_dict()
+    utleier_oppankring_avdrag_per_ar = _renter_avdrag_med_ar.groupby("ar")["avdrag_uke"].sum().to_dict()
+
+    utleier_regnskap = build_utleier_regnskap(
+        utleier_years, capex, kapitalleie_ar, utleier_kapitalleie_per_ar,
+        utleier_driftskostnader_per_ar, utleier_desinfeksjon_per_ar,
+        oppankring_inv, utleier_oppankring_renter_per_ar, utleier_oppankring_avdrag_per_ar,
+        ebitda_multipel, bankrente_pct_ar, banklan_ar_val, skattesats_pct, vedlikeholdsinvestering_pct_capex,
+        vedlikeholdsinvestering_indeksering_pct_ar, prosjekt_start_dato,
+        refi_intervall_ar=refi_intervall_ar, refi_multipel=refi_multipel, avskrivningstid_ar=int(avskrivningstid_ar),
+    )
+    utleier_lonnsomhet = utleier_regnskap["kombinert"]   # grunnlag for IRR (ebitda, netto kontantstrøm til eier, banklånsaldo)
+
+
+    def _utleier_tabell(df, labels, highlight):
+        _f = with_thousands(df, int_cols=[], float_cols=[c for c in df.columns if c != "periode"], float_decimals=0)
+        _w = _f.set_index("periode").T
+        _w.index.name = "Felt"
+        _w = _w.rename(index=labels)
+        _render_table(_w, highlight_groups=highlight,
+                      fixed_label_width_px=KONSOLIDERT_FELT_BREDDE_PX, fixed_data_col_width_px=KONSOLIDERT_KOL_BREDDE_PX)
+
+
+    # ---- Operasjonelt kapitalbehov for SFaaS-aktøren (utleier) ----
+    # Egenkapital ved oppstart = CAPEX - banklån. I tillegg: hvor mye eier
+    # må skyte inn i år der fri kontantstrøm er negativ (kontantbeholdning
+    # holdes på 0, så negativ "kontantstrøm til eier" = innskudd). Bunnpunktet
+    # i akkumulert kontantstrøm til eier (uten år 0) er det operasjonelle
+    # kapitalbehovet utover startegenkapitalen.
+    # Utfasingsårene på slutten av simuleringen (siste kohorter leveres, ingen
+    # nye innsett) holdes utenfor - der blir EBITDA neste år kunstig lav og
+    # en refinansiering det året ville gitt et meningsløst stort "innskudd".
+    _ut_cf = utleier_regnskap["kontantstrom"]
+    _ut_cf = _ut_cf[_ut_cf["periode"] < int(cfg.START_ISO_YEAR) + int(cfg.N_YEARS_TO_RUN)].reset_index(drop=True)
+    _ut_akk = _ut_cf["kontantstrom_til_eier_kr"].cumsum()
+    _ut_bunn_idx = int(_ut_akk.idxmin())
+    _ut_bunn = float(_ut_akk.loc[_ut_bunn_idx])
+    _ut_bunn_ar = int(_ut_cf.loc[_ut_bunn_idx, "periode"])
+    _ut_ek0 = capex - utleier_regnskap["banklan_belop_kr"]
+    _ut_operasjonelt = max(0.0, -_ut_bunn)
+    _ut_innskudd_senere = float((-_ut_cf["kontantstrom_til_eier_kr"]).clip(lower=0).sum())
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Egenkapital ved oppstart (år 0)", f"{fmt_int(_ut_ek0)} kr")
+    c2.metric("Operasjonelt kapitalbehov utover EK", f"{fmt_int(_ut_operasjonelt)} kr",
+              help="Bunnpunktet i akkumulert kontantstrøm til eier etter oppstart - det eier må ha tilgjengelig "
+                   "i tillegg til startegenkapitalen for å dekke år med negativ fri kontantstrøm.")
+    c3.metric("Totalt kapitalbehov eier", f"{fmt_int(_ut_ek0 + _ut_operasjonelt)} kr")
+    c4.metric("Sum innskudd i negative år", f"{fmt_int(_ut_innskudd_senere)} kr")
+    st.caption(
+        f"Beregnet for {int(_ut_cf['periode'].min())}-{int(_ut_cf['periode'].max())} (utfasingsårene på slutten holdt utenfor). "
+        f"Akkumulert kontantstrøm til eier (uten år 0) bunner i {_ut_bunn_ar} på {fmt_int(_ut_bunn)} kr"
+        + (" - ingen år med negativ fri kontantstrøm, så kapitalbehovet er startegenkapitalen alene."
+           if _ut_operasjonelt == 0 else
+           f". Det operasjonelle kapitalbehovet kommer i tillegg til egenkapitalen på {fmt_int(_ut_ek0)} kr ved oppstart.")
+    )
+
+    # ---- Investert kapital - sources & uses for UTLEIER ----
+    _ut_uses = capex + _ut_operasjonelt
+    _ut_lan = utleier_regnskap["banklan_belop_kr"]
+    _ut_rows = [
+        ("USES", "", ""),
+        ("Investering Big Dipper (CAPEX)", capex, capex / _ut_uses if _ut_uses else 0.0),
+        (f"Operasjonelt kapitalbehov, på det meste ({_ut_bunn_ar})", _ut_operasjonelt, _ut_operasjonelt / _ut_uses if _ut_uses else 0.0),
+        ("Sum uses", _ut_uses, 1.0),
+        ("SOURCES", "", ""),
+        ("Banklån", _ut_lan, _ut_lan / _ut_uses if _ut_uses else 0.0),
+        ("Egenkapital - investering", _ut_ek0, _ut_ek0 / _ut_uses if _ut_uses else 0.0),
+        ("Egenkapital - operasjonelt kapitalbehov", _ut_operasjonelt, _ut_operasjonelt / _ut_uses if _ut_uses else 0.0),
+        ("Sum sources", _ut_lan + _ut_ek0 + _ut_operasjonelt, 1.0),
+        ("Herav egenkapital totalt", _ut_ek0 + _ut_operasjonelt, (_ut_ek0 + _ut_operasjonelt) / _ut_uses if _ut_uses else 0.0),
+    ]
+    _ut_ik_df = pd.DataFrame({
+        "Felt": [r[0] for r in _ut_rows],
+        "NOK": [fmt_int(r[1]) if r[1] != "" else "" for r in _ut_rows],
+        "Andel (%)": [fmt_float(r[2] * 100, 1) if r[2] != "" else "" for r in _ut_rows],
+    }).set_index("Felt")
+    st.markdown("**Investert kapital - sources & uses (utleier)**")
+    _render_table(_ut_ik_df, highlight_groups=[
+        {"rows": ["USES", "SOURCES"], "bg": "#eef1f6", "text": "#5b6b82"},
+        {"rows": ["Sum uses", "Sum sources"], "bg": "#eef7ee", "text": "#3d7a3d"},
+        {"rows": ["Herav egenkapital totalt"], "bg": "#fbf3e6", "text": "#9a6b2a"},
+    ], fixed_label_width_px=KONSOLIDERT_FELT_BREDDE_PX + 160, fixed_data_col_width_px=KONSOLIDERT_KOL_BREDDE_PX)
+
+    # ---- Tilbakebetaling av egenkapital - utleier: akkumulert utbytte
+    #      (kontantstrøm til eier) mot innskutt egenkapital. Utleiermodellen
+    #      er årlig - fordeles jevnt per måned innenfor året. ----
+    st.markdown("**Akkumulert kontantstrøm til egenkapital - utleier (månedlig)**")
+    st.caption(
+        "Akkumulert utbytte/kontantstrøm til eier (inkl. refinansieringsproveny) - årstall fordelt jevnt "
+        "per måned. Stiplet linje = egenkapital ved oppstart; markøren viser første måned der eier har fått "
+        "hele innskuddet tilbake. Terminalverdi ved exit er IKKE med (den ligger kun i IRR-beregningen)."
+    )
+    _ut_dates, _ut_akk_m = [], []
+    _ut_sum = 0.0
+    for _, _r in utleier_regnskap["kontantstrom"].iterrows():
+        for _m in range(1, 13):
+            _ut_sum += _r["kontantstrom_til_eier_kr"] / 12.0
+            _ut_dates.append(date(int(_r["periode"]), _m, 1))
+            _ut_akk_m.append(_ut_sum)
+    _ek_tilbakebetaling_graf(_ut_dates, _ut_akk_m, [("Egenkapital ved oppstart", _ut_ek0)],
+                             "Utleier (Aqualoop) - akkumulert kontantstrøm til eier mot innskutt egenkapital",
+                             "Akkumulert kontantstrøm til eier (MNOK)")
+
+    st.markdown("**Resultatregnskap - utleier**")
+    _utleier_tabell(utleier_regnskap["resultat"], {
+        "leieinntekter_kr": "Leieinntekter 13.1-13.10 (kr)", "driftskostnader_kr": "Driftskostnader 13.3-13.10 (kr)",
+        "ebitda_kr": "EBITDA (= 13.1 Kapitalleie) (kr)", "avskrivninger_kr": "Avskrivninger (kr)", "ebit_kr": "EBIT (kr)",
+        "finanskostnader_kr": "Finanskostnader, banklån (kr)", "finansinntekter_kr": "Finansinntekter, oppankring (kr)",
+        "resultat_for_skatt_kr": "Resultat før skatt (kr)", "skatt_kr": "Skatt (kr)", "arsresultat_kr": "Årsresultat (kr)",
+    }, [
+        {"rows": ["EBITDA (= 13.1 Kapitalleie) (kr)", "EBIT (kr)", "Resultat før skatt (kr)"], "bg": "#fbf3e6", "text": "#9a6b2a"},
+        {"rows": ["Årsresultat (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
+    ])
+
+    st.markdown("**Kontantstrøm - utleier (direkte metode)**")
+    st.caption("Negativt fortegn = utbetaling. Utbytte/innskudd = hele den frie kontantstrømmen, så 'Endring kontanter' er alltid 0.")
+    _ut_cf_vis = utleier_regnskap["kontantstrom"].drop(columns=["arsresultat_kr", "avskrivninger_kr"])
+    _utleier_tabell(_ut_cf_vis, {
+        "innbet_leie_kr": "Innbetalinger fra kunde, leie 13.1-13.10 (kr)",
+        "utbet_drift_kr": "Utbetalinger driftskostnader 13.3-13.10 (kr)",
+        "utbet_renter_kr": "Renter betalt, banklån (kr)",
+        "innbet_renter_kunde_kr": "Renter mottatt, oppankring (kr)",
+        "utbet_skatt_kr": "Skatt betalt (kr)",
+        "kfo_kr": "Kontantstrøm fra drift (kr)",
+        "investering_capex_kr": "Investering i anlegg, CAPEX (kr)", "vedlikeholdsinvestering_kr": "Vedlikeholdsinvesteringer (kr)",
+        "kfi_kr": "Kontantstrøm fra investering (kr)",
+        "utlan_kunde_kr": "Utlån til kunde, oppankring (kr)", "avdrag_kunde_kr": "Avdrag fra kunde, oppankring (kr)",
+        "banklan_opptak_kr": "Opptak banklån (kr)", "refinansiering_kr": "Refinansiering, netto proveny (kr)",
+        "avdrag_bank_kr": "Avdrag banklån (kr)", "egenkapitalinnskudd_kr": "Egenkapitalinnskudd ved oppstart (kr)",
+        "fri_kontantstrom_kr": "Fri kontantstrøm før utbytte (kr)", "utbytte_kr": "Utbytte til eier (-) / innskudd fra eier (+) (kr)",
+        "kff_kr": "Kontantstrøm fra finansiering (kr)", "endring_kontanter_kr": "Endring kontanter (kr)",
+        "kontantstrom_til_eier_kr": "Kontantstrøm til eier (IRR-grunnlag) (kr)",
+    }, [
+        {"rows": ["Kontantstrøm fra drift (kr)", "Kontantstrøm fra investering (kr)", "Kontantstrøm fra finansiering (kr)"], "bg": "#fbf3e6", "text": "#9a6b2a"},
+        {"rows": ["Fri kontantstrøm før utbytte (kr)", "Kontantstrøm til eier (IRR-grunnlag) (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
+    ])
+
+    st.markdown("**Balanse - utleier (31.12)**")
+    _utleier_tabell(utleier_regnskap["balanse"], {
+        "anlegg_kostpris_kr": "Anlegg, kostpris inkl. vedlikeholdsinvesteringer (kr)", "akk_avskrivninger_kr": "Akkumulerte avskrivninger (kr)",
+        "anlegg_bokfort_kr": "Anlegg, bokført verdi (kr)", "utlan_kunde_kr": "Utlån til kunde, oppankring (kr)",
+        "kontanter_kr": "Kontanter (kr)", "sum_eiendeler_kr": "Sum eiendeler (kr)",
+        "banklan_kr": "Banklån (kr)", "innskutt_egenkapital_kr": "Innskutt egenkapital (kr)",
+        "opptjent_egenkapital_kr": "Opptjent egenkapital etter utbytte (kr)", "sum_egenkapital_kr": "Sum egenkapital (kr)",
+        "sum_gjeld_egenkapital_kr": "Sum gjeld og egenkapital (kr)", "differanse_kr": "Differanse (skal være 0)",
+    }, [
+        {"rows": ["Sum eiendeler (kr)", "Sum gjeld og egenkapital (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
+        {"rows": ["Differanse (skal være 0)"], "bg": "#fdecea", "text": "#a33"},
+    ])
+
+    # ----------------------------------------------------------------------
+    # NYBYGGPARITET - guide for ny TC. Nybyggpris indeksert fra startåret,
+    # EBITDA-krav = yield x nybyggpris, guide-TC = EBITDA-krav + årets opex i
+    # leien. Sammenlignes med faktisk kapitalleie (13.1) og faktisk leie.
+    # ----------------------------------------------------------------------
+    st.subheader("Nybyggparitet - guide for ny TC på riggen")
+    st.caption(
+        f"Nybyggpris = {fmt_int(capex)} x (1 + {byggeindeks_pct_ar*100:.1f} %) per år fra {int(cfg.START_ISO_YEAR)}. "
+        f"EBITDA-krav = nybyggpris x {ebitda_yield_pct*100:.1f} %. Guide-TC = EBITDA-krav + årets driftskostnader i leien "
+        "(13.3-13.10, gjennomfakturert). 'Tilsvarer kapitalleie-sats' er EBITDA-kravet delt på opprinnelig CAPEX - det "
+        "satsen som ville gitt full nybyggparitet. Reforhandling velges i sidepanelet (år + andel av gapet) - de "
+        "valgte nye satsene vises nederst i tabellen. Avvik = guide-TC minus faktisk leie (positivt = riggen er "
+        "underpriset mot nybygg). EBITDA-yield og byggeindeks endres i sidepanelet under 13.1 Kapitalleie."
+    )
+    _np_rows = {}
+    _np_ar = [y for y in utleier_years if y < int(cfg.START_ISO_YEAR) + int(cfg.N_YEARS_TO_RUN)]
+    _kg_solgt_per_ar = summarize_cashflow_by_period(cashflow, "ar").set_index("periode")["kg_solgt"].to_dict() if len(cashflow) else {}
+    _leie_tot_per_ar = _fastkost_med_ar.groupby("ar")["kr_leie_anlegg"].sum().to_dict()
+    for y in _np_ar:
+        _nyb = capex * (1 + byggeindeks_pct_ar) ** (y - int(cfg.START_ISO_YEAR))
+        _krav = _nyb * ebitda_yield_pct
+        _opex = utleier_driftskostnader_per_ar.get(y, 0.0) + utleier_desinfeksjon_per_ar.get(y, 0.0)
+        _guide = _krav + _opex
+        _fakt_131 = utleier_kapitalleie_per_ar.get(y, 0.0)
+        _fakt_leie = _leie_tot_per_ar.get(y, 0.0)
+        _kg = _kg_solgt_per_ar.get(y, 0.0)
+        _rf_y = next((r for r in kapitalleie_reprising if r["ar"] == y), None)
+        _np_rows[y] = {
+            "Nybyggpris, indeksert (kr)": fmt_int(_nyb),
+            "EBITDA-yield, valgt (%)": fmt_float(ebitda_yield_pct * 100, 1),
+            "EBITDA-krav = yield x nybyggpris (kr)": fmt_int(_krav),
+            "Tilsvarer kapitalleie-sats på opprinnelig CAPEX (%)": fmt_float(_krav / capex * 100, 1) if capex else "",
+            "Årets driftskostnader i leien (kr)": fmt_int(_opex),
+            "Guide-TC = EBITDA-krav + opex (kr)": fmt_int(_guide),
+            "Faktisk kapitalleie 13.1 (kr)": fmt_int(_fakt_131),
+            "Faktisk leie totalt 13.1-13.10 (kr)": fmt_int(_fakt_leie),
+            "Avvik guide-TC - faktisk leie (kr)": fmt_int(_guide - _fakt_leie),
+            f"Guide-TC per solgt kg ({solgt_enhet})": fmt_float(_guide / _kg, 2) if _kg else "",
+            f"Faktisk leie per solgt kg ({solgt_enhet})": fmt_float(_fakt_leie / _kg, 2) if _kg else "",
+            "Reforhandling: andel av gap hentet inn (%)": fmt_float(_rf_y["andel"] * 100, 0) if _rf_y else "",
+            "Reforhandling: ny kapitalleie 13.1 (kr)": fmt_int(_rf_y["ny_131"]) if _rf_y else "",
+            "Reforhandling: ny kapitalleie-sats (%)": fmt_float(_rf_y["sats_pct"] * 100, 2) if _rf_y else "",
+        }
+    _np_wide = pd.DataFrame(_np_rows)
+    _np_wide.index.name = "Felt"
+    _render_table(_np_wide, highlight_groups=[
+        {"rows": ["Guide-TC = EBITDA-krav + opex (kr)", "Tilsvarer kapitalleie-sats på opprinnelig CAPEX (%)"], "bg": "#eef7ee", "text": "#3d7a3d"},
+        {"rows": ["Avvik guide-TC - faktisk leie (kr)"], "bg": "#f3eef6", "text": "#6b4f82"},
+        {"rows": [f"Guide-TC per solgt kg ({solgt_enhet})", f"Faktisk leie per solgt kg ({solgt_enhet})"], "bg": "#fbf3e6", "text": "#9a6b2a"},
+        {"rows": ["Reforhandling: andel av gap hentet inn (%)", "Reforhandling: ny kapitalleie 13.1 (kr)",
+                  "Reforhandling: ny kapitalleie-sats (%)"], "bg": "#eef1f6", "text": "#5b6b82"},
+    ], fixed_label_width_px=KONSOLIDERT_FELT_BREDDE_PX, fixed_data_col_width_px=KONSOLIDERT_KOL_BREDDE_PX)
+    if kapitalleie_reprising:
+        st.caption("Reforhandlinger valgt i sidepanelet (13.1 Kapitalleie): " + "; ".join(
+            f"{r['ar']}: {fmt_int(r['gammel_131'])} → {fmt_int(r['ny_131'])} kr ({r['andel']*100:.0f} % av gapet til "
+            f"{fmt_int(r['krav_131'])}), ny sats {r['sats_pct']*100:.2f} %" for r in kapitalleie_reprising))
+
+    if _vis_irr:
+        # ============================================================================
+        # IRR - UTLEIERS EGENKAPITAL, MED TERMINALVERDI VED EXIT
+        # ============================================================================
+        st.subheader(f"IRR - Utleiers egenkapital (eiertid {holding_years_val} år, terminalverdi år {holding_years_val})")
         st.caption(
-            f"Terminalverdi = {terminal_ebitda_multipel:.1f} x EBITDA år {holding_years_val + 1} "
-            f"({irr_resultat['terminal_ar']}, det KOMMENDE året etter exit - fremadskuende, ikke historisk): "
-            f"{terminal_ebitda_multipel:.1f} x {fmt_int(irr_resultat['ebitda_terminal_kr'])} = "
-            f"{fmt_int(irr_resultat['terminal_ev_kr'])} kr. År 1 = {irr_resultat['terminal_ar'] - holding_years_val}, "
-            f"år {holding_years_val} = {_exit_ar}. Gjenværende banklånsgjeld ved exit (utgangen av {_exit_ar}): "
-            f"{fmt_int(irr_resultat['gjeld_ved_exit_kr'])} kr."
+            f"Internrente på UTLEIERS EGENKAPITAL i utleievirksomheten (ikke i selve oppdretts-"
+            f"virksomheten) over {holding_years_val} år. Egenkapitalinnskudd i år 0 = CAPEX minus "
+            f"utleiers eget banklån (lånefinansiert del). Årlige kontantstrømmer år 1-{holding_years_val} "
+            f"er 'Netto kontantstrøm til eier' fra tabellen over. I år {holding_years_val} legges det i "
+            f"tillegg til en TERMINALVERDI: {terminal_ebitda_multipel:.1f}x EBITDA året ETTER "
+            f"(fremadskuende multippel - en kjøper betaler for neste års forventede inntjening, ikke "
+            f"fjorårets), minus utleiers gjenværende banklånsgjeld på det tidspunktet (en kjøper "
+            f"overtar normalt virksomheten gjeldfri, så selger må dekke inn resten av lånet fra "
+            f"salgssummen for å finne hva egenkapitalen faktisk er verdt)."
         )
 
-        irr_kontantstrom_df = pd.DataFrame({
-            "periode": [f"År {i}" for i in range(len(irr_resultat["kontantstrom"]))],
-            "Kontantstrøm til egenkapital (kr)": irr_resultat["kontantstrom"],
-        })
-        irr_kontantstrom_formatted = with_thousands(irr_kontantstrom_df, float_cols=["Kontantstrøm til egenkapital (kr)"], float_decimals=0)
-        irr_wide = irr_kontantstrom_formatted.set_index("periode").T
-        irr_wide.index.name = "Felt"
-        _render_table(irr_wide, fixed_label_width_px=KONSOLIDERT_FELT_BREDDE_PX, fixed_data_col_width_px=KONSOLIDERT_KOL_BREDDE_PX)
+        irr_resultat = build_utleier_irr(
+            utleier_lonnsomhet, capex, utleier_regnskap["banklan_belop_kr"], bankrente_pct_ar,
+            int(round(banklan_ar_val * 12)), terminal_ebitda_multipel, int(holding_years_val),
+        )
+
+        if irr_resultat["irr"] is None:
+            st.warning(
+                "Fant ingen IRR-løsning for denne kontantstrømmen (ingen fortegnsskifte i det "
+                "søkte rente-intervallet -99 % til 1000 %) - sjekk om forutsetningene gir en "
+                "urealistisk kontantstrøm (f.eks. terminalverdi lavere enn gjenværende gjeld)."
+            )
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("IRR", f"{irr_resultat['irr']*100:.1f} %")
+            c2.metric("Egenkapitalinnskudd (år 0)", f"{fmt_int(irr_resultat['egenkapital_innskudd_kr'])} kr")
+            _exit_ar = irr_resultat['terminal_ar'] - 1
+            c3.metric(f"Terminalverdi (EV ved exit, utgangen av år {holding_years_val} = {_exit_ar})",
+                      f"{fmt_int(irr_resultat['terminal_ev_kr'])} kr")
+            c4.metric(f"Terminal egenkapitalverdi", f"{fmt_int(irr_resultat['terminal_egenkapital_kr'])} kr")
+            st.caption(
+                f"Terminalverdi = {terminal_ebitda_multipel:.1f} x EBITDA år {holding_years_val + 1} "
+                f"({irr_resultat['terminal_ar']}, det KOMMENDE året etter exit - fremadskuende, ikke historisk): "
+                f"{terminal_ebitda_multipel:.1f} x {fmt_int(irr_resultat['ebitda_terminal_kr'])} = "
+                f"{fmt_int(irr_resultat['terminal_ev_kr'])} kr. År 1 = {irr_resultat['terminal_ar'] - holding_years_val}, "
+                f"år {holding_years_val} = {_exit_ar}. Gjenværende banklånsgjeld ved exit (utgangen av {_exit_ar}): "
+                f"{fmt_int(irr_resultat['gjeld_ved_exit_kr'])} kr."
+            )
+
+            irr_kontantstrom_df = pd.DataFrame({
+                "periode": [f"År {i}" for i in range(len(irr_resultat["kontantstrom"]))],
+                "Kontantstrøm til egenkapital (kr)": irr_resultat["kontantstrom"],
+            })
+            irr_kontantstrom_formatted = with_thousands(irr_kontantstrom_df, float_cols=["Kontantstrøm til egenkapital (kr)"], float_decimals=0)
+            irr_wide = irr_kontantstrom_formatted.set_index("periode").T
+            irr_wide.index.name = "Felt"
+            _render_table(irr_wide, fixed_label_width_px=KONSOLIDERT_FELT_BREDDE_PX, fixed_data_col_width_px=KONSOLIDERT_KOL_BREDDE_PX)

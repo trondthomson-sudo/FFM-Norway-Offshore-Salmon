@@ -288,7 +288,7 @@ FIXED_COSTS = [
 # skrives inn direkte - se streamlit_app_1tank.py sin egen underseksjon.
 FIXED_COST_KR_PER_UKE = {
     "leie_anlegg": None,
-    "bronnbat": 150_000_000.0 / 52.0,             # 14. Brønnbåter: 150 MNOK/år (BEKREFTET av bruker, startverdi)
+    "bronnbat": 200_000_000.0 / 52.0,             # 14. Brønnbåter: 200 MNOK/år (BEKREFTET av bruker)
     "teknisk_vedlikehold": 20_000_000.0 / 52.0,   # 15. ADK: 20 MNOK/år (BEKREFTET av bruker)
     "administrasjon": 20_000_000.0 / 52.0,        # 16. Administrasjon: 20 MNOK/år (BEKREFTET av bruker)
 }

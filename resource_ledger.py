@@ -982,7 +982,12 @@ def build_utleier_regnskap(years: list, capex: float, kapitalleie_basisar: float
                          "avskrivninger_kr": avskr, "ebit_kr": ebit, "finanskostnader_kr": renter,
                          "finansinntekter_kr": finansinnt, "resultat_for_skatt_kr": rfs, "skatt_kr": skatt,
                          "arsresultat_kr": arsres})
-        cf_rows.append({"periode": y, "arsresultat_kr": arsres, "avskrivninger_kr": avskr, "kfo_kr": kfo,
+        cf_rows.append({"periode": y,
+                        # DIREKTE metode: inn-/utbetalinger fra drift (ingen arbeidskapital i
+                        # utleiermodellen, så summen = årsresultat + avskrivninger)
+                        "innbet_leie_kr": leie, "utbet_drift_kr": -drift, "utbet_renter_kr": -renter,
+                        "innbet_renter_kunde_kr": finansinnt, "utbet_skatt_kr": -skatt,
+                        "arsresultat_kr": arsres, "avskrivninger_kr": avskr, "kfo_kr": kfo,
                         "investering_capex_kr": -invest_capex, "vedlikeholdsinvestering_kr": -vedl, "kfi_kr": kfi,
                         "utlan_kunde_kr": -utlan_ny, "avdrag_kunde_kr": avdrag_kunde,
                         "banklan_opptak_kr": opptak, "refinansiering_kr": refi, "avdrag_bank_kr": -avdrag,
@@ -999,6 +1004,62 @@ def build_utleier_regnskap(years: list, capex: float, kapitalleie_basisar: float
     return {"resultat": pd.DataFrame(res_rows), "kontantstrom": pd.DataFrame(cf_rows),
             "balanse": pd.DataFrame(bal_rows), "kombinert": pd.DataFrame(komb_rows),
             "banklan_belop_kr": banklan_belop}
+
+
+def build_eier_uke(cfg, alle_uker_uke_dato: list, capex: float, banklan_belop: float, bankrente_pct_ar: float,
+                   banklan_maneder: int, prosjekt_start_dato: date, vedlikehold_basis_ar: float,
+                   vedlikehold_indeks_pct_ar: float, avskrivningstid_ar: int) -> pd.DataFrame:
+    """KONSOLIDERT visning: anlegget eies av OPPDRETTER selv (ingen leie). Én
+    rad per uke med eierens egne poster, klare til å legges inn i
+    Konsolidert kontantstrøm, Resultatregnskap og Balanse:
+      capex_kr        - investering i anlegget (uke 0)
+      lan_opptak_kr   - banklån tatt opp (uke 0)
+      ek_innskudd_kr  - egenkapitalinnskudd (uke 0) = CAPEX - lån
+      renter_kr / avdrag_kr - banklånets annuitet (månedsplan fordelt på uker)
+      vedlikehold_kr  - vedlikeholdsinvesteringer (aktiveres), NOK/år fordelt /52
+      avskrivning_kr  - lineær avskrivning av CAPEX + aktiverte vedlikeholdsinv.
+      lan_saldo_kr    - utgående lånesaldo, anlegg_bokfort_kr - bokført verdi
+    Ingen refinansiering her (konsolidert = ren driftsmodell)."""
+    uker = [u for u, _ in alle_uker_uke_dato]
+    datoer = {u: d for u, d in alle_uker_uke_dato}
+    ra = build_renter_avdrag_per_uke(banklan_belop, bankrente_pct_ar, banklan_maneder, prosjekt_start_dato, uker, datoer)
+    renter = dict(zip(ra["uke"], ra["renter_uke"]))
+    avdrag = dict(zip(ra["uke"], ra["avdrag_uke"]))
+    y0 = int(pd.to_datetime(datoer[uker[0]]).isocalendar()[0]) if uker else prosjekt_start_dato.year
+    n = max(1, int(avskrivningstid_ar))
+    rows, saldo, akk_avskr, aktivert = [], float(banklan_belop), 0.0, [(float(capex), y0)]
+    vedl_akt_ar = {}
+    for i, u in enumerate(uker):
+        y = int(pd.to_datetime(datoer[u]).isocalendar()[0])
+        vedl_ar = escalate_price(vedlikehold_basis_ar, vedlikehold_indeks_pct_ar, y, y0)
+        vedl = vedl_ar / 52.0
+        vedl_akt_ar[y] = vedl_akt_ar.get(y, 0.0) + vedl
+        # avskrivning per uke: CAPEX fra uke 0; vedlikehold fra året etter aktivering
+        avskr = capex / n / 52.0 if y < y0 + n else 0.0
+        # vedlikehold aktivert i år a avskrives lineært fra år a+1 i n år
+        avskr += sum(b / n / 52.0 for a, b in _vedl_sum_per_ar(vedl_akt_ar).items() if a + 1 <= y < a + 1 + n)
+        r_, a_ = renter.get(u, 0.0), avdrag.get(u, 0.0)
+        saldo = max(0.0, saldo - a_)
+        akk_avskr += avskr
+        rows.append({
+            "uke": u, "dato": datoer[u],
+            "capex_kr": capex if i == 0 else 0.0,
+            "lan_opptak_kr": banklan_belop if i == 0 else 0.0,
+            "ek_innskudd_kr": (capex - banklan_belop) if i == 0 else 0.0,
+            "renter_kr": r_, "avdrag_kr": a_, "vedlikehold_kr": vedl, "avskrivning_kr": avskr,
+            "lan_saldo_kr": saldo,
+            "anlegg_kostpris_kr": capex + sum(vedl_akt_ar.values()),
+            "akk_avskrivning_kr": akk_avskr,
+            "anlegg_bokfort_kr": capex + sum(vedl_akt_ar.values()) - akk_avskr,
+        })
+    return pd.DataFrame(rows)
+
+
+def _vedl_sum_per_ar(vedl_akt_ar: dict) -> dict:
+    """Vedlikeholdsinvesteringer aktivert per år (kun HELE tidligere år
+    teller som ferdig aktivert - inneværende år bygges opp uke for uke og
+    begynner å avskrives året etter)."""
+    return dict(vedl_akt_ar)
 
 
 def banklan_med_refinansiering(belop0: float, rente_pct_ar: float, maneder: int, start_dato: date,
@@ -1238,8 +1299,17 @@ def build_resultatregnskap(cfg, cashflow: pd.DataFrame, fixed_costs_weekly: pd.D
     out = out.sort_values("periode").reset_index(drop=True)
     n_uker = out["periode"].map(uker_per_periode).fillna(0.0).astype(float)
     out["avskrivninger_kr"] = n_uker * avskr_ar / 52.0
-    out["ebit_kr"] = out["ebitda_kr"] - out["avskrivninger_kr"]
     out["finanskostnader_kr"] = n_uker * finans_ar / 52.0
+    # KONSOLIDERT: avskrivninger og renter fra eierens egen ukeplan (CAPEX,
+    # vedlikeholdsinvesteringer, banklån) kommer I TILLEGG til de flate.
+    eier = getattr(cfg, "EIER_UKE", None)
+    if eier is not None and len(eier):
+        e = eier.copy()
+        e["periode"] = e["uke"].map(dict(zip(fast["uke"], fast["periode"])))
+        e_sum = e.dropna(subset=["periode"]).groupby("periode", sort=True)[["avskrivning_kr", "renter_kr"]].sum()
+        out["avskrivninger_kr"] = out["avskrivninger_kr"] + out["periode"].map(e_sum["avskrivning_kr"]).fillna(0.0)
+        out["finanskostnader_kr"] = out["finanskostnader_kr"] + out["periode"].map(e_sum["renter_kr"]).fillna(0.0)
+    out["ebit_kr"] = out["ebitda_kr"] - out["avskrivninger_kr"]
     out["resultat_for_skatt_kr"] = out["ebit_kr"] - out["finanskostnader_kr"]
 
     # Skatt beregnes ALLTID på ÅRSBASIS (slik selskapsskatt faktisk
@@ -1527,7 +1597,31 @@ def build_balanse(cfg, ledger: pd.DataFrame, cashflow: pd.DataFrame, generations
     innbetalt = inntekt_uke.shift(kundefrist_uker, fill_value=0.0)
     utbetalt_variabel = palopt["kostnad_palopt_totalt"].shift(leverandorfrist_uker, fill_value=0.0)
     netto_kontant_uke = innbetalt - utbetalt_variabel - fast_uke
-    kontanter = apningskontanter + netto_kontant_uke.cumsum()
+    # KONSOLIDERT: eierens egne poster (CAPEX ut, lån inn, EK-innskudd inn,
+    # renter/avdrag/vedlikehold ut) i kontanter; anlegg og lån i balansen.
+    eier = getattr(cfg, "EIER_UKE", None)
+    if eier is not None and len(eier):
+        e = eier.set_index("uke").reindex(alle_uker)
+        # beholdningskolonner (bokført anlegg, lånesaldo) føres videre i uker
+        # utenfor eier-planen (f.eks. siste uke i balansen) - flows = 0 der
+        for _c in ("anlegg_bokfort_kr", "lan_saldo_kr"):
+            e[_c] = e[_c].ffill()
+        e = e.fillna(0.0)
+        eier_kontant = (e["lan_opptak_kr"] + e["ek_innskudd_kr"] - e["capex_kr"] - e["vedlikehold_kr"]
+                        - e["renter_kr"] - e["avdrag_kr"])
+        netto_kontant_uke = netto_kontant_uke + eier_kontant.values
+        anlegg_serie = pd.Series(e["anlegg_bokfort_kr"].values, index=alle_uker)
+        lan_serie = pd.Series(e["lan_saldo_kr"].values, index=alle_uker)
+        innskutt_serie = pd.Series(e["ek_innskudd_kr"].cumsum().values, index=alle_uker)
+        eier_resultat_uke = pd.Series((-(e["avskrivning_kr"] + e["renter_kr"])).values, index=alle_uker)
+    else:
+        anlegg_serie = lan_serie = innskutt_serie = pd.Series(0.0, index=alle_uker)
+        eier_resultat_uke = pd.Series(0.0, index=alle_uker)
+    # Operasjonelt EK-innskudd (fra appen, to-trinns beregning): inn i
+    # kontanter OG innskutt egenkapital fra uke 1.
+    ek_oper = float(getattr(cfg, "EK_OPERASJONELT_KR", 0.0) or 0.0)
+    kontanter = apningskontanter + ek_oper + netto_kontant_uke.cumsum()
+    innskutt_serie = innskutt_serie + ek_oper
 
     # ---- Kundefordringer / leverandørgjeld (rullerende N-ukers vindu) ----
     kundefordringer = inntekt_uke.rolling(window=max(kundefrist_uker, 1), min_periods=1).sum() if kundefrist_uker > 0 else pd.Series(0.0, index=alle_uker)
@@ -1549,7 +1643,7 @@ def build_balanse(cfg, ledger: pd.DataFrame, cashflow: pd.DataFrame, generations
     varekost_matchet_serie = pd.Series({u: matchet_andre.get(u, 0.0) for u in alle_uker})
     lonn_matchet_serie = pd.Series({u: matchet_lonn.get(u, 0.0) for u in alle_uker})
 
-    resultat_uke = inntekt_uke - varekost_matchet_serie - lonn_matchet_serie - fast_uke
+    resultat_uke = inntekt_uke - varekost_matchet_serie - lonn_matchet_serie - fast_uke + eier_resultat_uke.values
     opptjent_egenkapital = apningsegenkapital + resultat_uke.cumsum()
 
     out = pd.DataFrame({
@@ -1558,11 +1652,14 @@ def build_balanse(cfg, ledger: pd.DataFrame, cashflow: pd.DataFrame, generations
         "kontanter": kontanter.values,
         "kundefordringer": kundefordringer.values,
         "biologisk_eiendel": biologisk_eiendel.values,
+        "anlegg": anlegg_serie.values,
         "leverandorgjeld": leverandorgjeld.values,
+        "banklan": lan_serie.values,
+        "innskutt_egenkapital": innskutt_serie.values,
         "opptjent_egenkapital": opptjent_egenkapital.values,
     })
-    out["sum_eiendeler"] = out["kontanter"] + out["kundefordringer"] + out["biologisk_eiendel"]
-    out["sum_gjeld_og_egenkapital"] = out["leverandorgjeld"] + out["opptjent_egenkapital"]
+    out["sum_eiendeler"] = out["kontanter"] + out["kundefordringer"] + out["biologisk_eiendel"] + out["anlegg"]
+    out["sum_gjeld_og_egenkapital"] = out["leverandorgjeld"] + out["banklan"] + out["innskutt_egenkapital"] + out["opptjent_egenkapital"]
     out["differanse"] = out["sum_eiendeler"] - out["sum_gjeld_og_egenkapital"]
     return out
 
@@ -1866,7 +1963,28 @@ def build_konsolidert_kontantstrom(cfg, cashflow: pd.DataFrame, fixed_costs_week
     out = out.rename(columns={"kostnad_totalt_kr": "kostnad_variabel_totalt_kr"})
     out["kostnad_totalt_konsolidert_kr"] = out["kostnad_variabel_totalt_kr"] + out["kr_faste_totalt"]
     out["netto_kontantstrom_konsolidert_kr"] = out["inntekt_kr"] - out["kostnad_totalt_konsolidert_kr"]
+    # ---- KONSOLIDERT: eierens egne kontantstrømmer (CAPEX, lån, renter,
+    #      avdrag, vedlikeholdsinvesteringer, egenkapitalinnskudd) ----
+    eier = getattr(cfg, "EIER_UKE", None)
+    eier_kolonner = ["capex_kr", "vedlikehold_kr", "renter_kr", "avdrag_kr", "lan_opptak_kr", "ek_innskudd_kr"]
+    if eier is not None and len(eier):
+        e = eier.copy()
+        e["periode"] = e["uke"].map(dict(zip(fast["uke"], fast["periode"])))
+        e_sum = e.dropna(subset=["periode"]).groupby("periode", sort=True)[eier_kolonner].sum().reset_index()
+        out = out.merge(e_sum, on="periode", how="left").fillna(0.0)
+        out["eier_netto_kr"] = (out["lan_opptak_kr"] + out["ek_innskudd_kr"] - out["capex_kr"]
+                                - out["vedlikehold_kr"] - out["renter_kr"] - out["avdrag_kr"])
+        out["netto_kontantstrom_konsolidert_kr"] = out["netto_kontantstrom_konsolidert_kr"] + out["eier_netto_kr"]
     out = out.sort_values("periode").reset_index(drop=True)
+    # Egenkapitalinnskudd for OPERASJONELT kapitalbehov (beregnet i appen i
+    # første gjennomkjøring som bunnpunktet i kontantbeholdningen, uten
+    # sirkularitet): legges inn i FØRSTE periode, så akkumulert kontantstrøm
+    # / kontanter bunner på 0 i stedet for på minus.
+    ek_oper = float(getattr(cfg, "EK_OPERASJONELT_KR", 0.0) or 0.0)
+    out["ek_operasjonelt_kr"] = 0.0
+    if ek_oper > 0 and len(out):
+        out.loc[0, "ek_operasjonelt_kr"] = ek_oper
+        out["netto_kontantstrom_konsolidert_kr"] = out["netto_kontantstrom_konsolidert_kr"] + out["ek_operasjonelt_kr"]
     out["akkumulert_kontantstrom_konsolidert_kr"] = out["netto_kontantstrom_konsolidert_kr"].cumsum()
     out["dekningsbidrag_kr"] = out["inntekt_kr"] - out["kostnad_variabel_totalt_kr"]
     out["dekningsgrad_pct"] = (out["dekningsbidrag_kr"] / out["inntekt_kr"] * 100).where(out["inntekt_kr"] > 0)
@@ -1913,6 +2031,10 @@ def build_konsolidert_kontantstrom(cfg, cashflow: pd.DataFrame, fixed_costs_week
             keep += [f"kr_{fc['id']}"]
     keep += ["kr_faste_totalt"]
     keep += ["kostnad_totalt_konsolidert_kr", "kostnadsindeks"]
+    if "eier_netto_kr" in out.columns:
+        keep += ["capex_kr", "vedlikehold_kr", "renter_kr", "avdrag_kr", "lan_opptak_kr", "ek_innskudd_kr", "eier_netto_kr"]
+    if ek_oper > 0:
+        keep += ["ek_operasjonelt_kr"]
     keep += ["netto_kontantstrom_konsolidert_kr"]
     keep += ["akkumulert_kontantstrom_konsolidert_kr"]
     return out[keep]
