@@ -33,7 +33,7 @@ from resource_ledger import (
     build_isolert_batch_projeksjon, build_renter_avdrag_per_uke, build_resultatregnskap,
     build_matchet_kostnad_per_uke, build_balanse, build_batch_resultat_og_balanse,
     build_batch_ukentlig_kostnad, build_batch_ukentlig_mengde, build_renter_avdrag_per_ar, build_utleier_lonnsomhet,
-    build_utleier_irr, interpoler_fiskeverdi_kr_per_kg, escalate_price_by_year, build_utleier_regnskap,
+    build_utleier_irr, interpoler_fiskeverdi_kr_per_kg, escalate_price_by_year, build_utleier_regnskap, banklan_med_refinansiering,
     build_eier_uke,
 )
 from formatting import fmt_int, fmt_float, parse_number, with_thousands, month_label, annuitet_manedsbelop, annuitetsplan
@@ -109,6 +109,47 @@ def _ek_tilbakebetaling_graf(dates, verdier_kr, terskler, tittel, serie_navn):
     for t in tekst:
         st.caption("→ " + t)
 
+
+def _naverdi_fossefall(ax, steg, tittel):
+    """Fossefall: liste av (navn, beløp_kr, er_subtotal). Positive/negative
+    trinn i hver sin farge, subtotaler som hele stolper fra 0."""
+    x, lop = 0, 0.0
+    for navn, belop, er_sub in steg:
+        v = belop / 1e6
+        if er_sub:
+            ax.bar(x, v, color="#2f5d8a", width=0.6)
+            ax.text(x, v + (30 if v >= 0 else -30), f"{v:,.0f}".replace(",", " "), ha="center",
+                    va="bottom" if v >= 0 else "top", fontsize=9, fontweight="bold")
+            lop = v
+        else:
+            bunn = lop if v >= 0 else lop + v
+            ax.bar(x, abs(v), bottom=bunn, color="#3d7a3d" if v >= 0 else "#c0392b", width=0.6)
+            ax.text(x, lop + v + (30 if v >= 0 else -30), ("0" if abs(v) < 0.5 else f"{'+' if v >= 0 else ''}{v:,.0f}").replace(",", " "),
+                    ha="center", va="bottom" if v >= 0 else "top", fontsize=9)
+            lop += v
+        x += 1
+    ax.set_xticks(range(len(steg)))
+    ax.set_xticklabels([n for n, _, _ in steg], fontsize=8, rotation=0, wrap=True)
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.set_ylabel("MNOK")
+    ax.set_title(tittel, fontsize=11, loc="left")
+    ax.grid(axis="y", alpha=0.3)
+    # Plass til etikettene over/under stolpene
+    ymax = max([0.0] + [b for b in _fossefall_nivaer(steg)]) / 1e6
+    ymin = min([0.0] + [b for b in _fossefall_nivaer(steg)]) / 1e6
+    ax.set_ylim(ymin - abs(ymax - ymin) * 0.12, ymax + abs(ymax - ymin) * 0.18)
+
+
+def _fossefall_nivaer(steg):
+    """Alle mellomnivåer i fossefallet (for å sette y-aksens grenser)."""
+    lop, ut = 0.0, []
+    for _, belop, er_sub in steg:
+        if er_sub:
+            lop = belop
+        else:
+            lop += belop
+        ut.append(lop)
+    return ut
 
 def _format_ledger_display(df: pd.DataFrame) -> pd.DataFrame:
     """Legger på tusenskiller (mellomrom) og fjerner unødvendige desimaler
@@ -3610,9 +3651,10 @@ for i, y in enumerate(_dcf_ar, start=1):
     _nwc_forrige = nwc
     invest = 0.0
     if konsolidert and cfg.EIER_UKE is not None:
+        # Vedlikeholdsinvesteringer i året; selve CAPEX legges på t=0 (udiskontert)
         _e = cfg.EIER_UKE
         _e_ar = _e[pd.to_datetime(_e["dato"]).dt.isocalendar().year == y]
-        invest = float(_e_ar["capex_kr"].sum() + _e_ar["vedlikehold_kr"].sum())
+        invest = float(_e_ar["vedlikehold_kr"].sum())
     fcff = ebitda - skatt - invest - d_nwc
     df_faktor = 1.0 / (1.0 + dcf_r) ** i
     _dcf_rows.append({"periode": y, "t": i, "ebitda_kr": ebitda, "avskrivninger_kr": avskr, "ebit_kr": ebit,
@@ -3623,42 +3665,79 @@ _N = len(_dcf_ar)
 _y_N, _y_N1 = _dcf_ar[-1], _dcf_ar[-1] + 1
 _ebitda_N1 = float(_dcf_res.loc[_y_N1, "ebitda_kr"]) if _y_N1 in _dcf_res.index else float(_dcf_res.loc[_y_N, "ebitda_kr"])
 _tv = dcf_multippel * _ebitda_N1
-_gjeld_N = float(_dcf_bal.loc[_y_N, "banklan"]) if ("banklan" in _dcf_bal.columns and _y_N in _dcf_bal.index) else 0.0
+# Totalkapitalmodellen: CAPEX er fullt utgiftsført (t=0) - da er lånet
+# allerede "betalt" i kontantstrømmen, og restgjeld ved horisont trekkes
+# IKKE fra i tillegg (det ville telt lånets andel av CAPEX to ganger).
+_gjeld_N = 0.0
+_capex_t0 = capex if konsolidert else 0.0
 _pv_fcff = float(_dcf_df["naverdi_kr"].sum())
 _pv_tv = _tv / (1.0 + dcf_r) ** _N
-_pv_gjeld = _gjeld_N / (1.0 + dcf_r) ** _N
-_npv = _pv_fcff + _pv_tv - _pv_gjeld
+_pv_gjeld = 0.0
+_npv = _pv_fcff + _pv_tv - _capex_t0
 st.caption(
     f"Avkastningskrav (ubelånt CAPM): {dcf_rf_pct*100:.2f} % + {dcf_beta:.2f} x {dcf_mp_pct*100:.2f} % = "
     f"{dcf_r*100:.2f} %. Horisont {_N} år ({_dcf_ar[0]}-{_y_N}), diskontert til 1. januar {_dcf_y0}. "
     f"Sluttverdi = {dcf_multippel:.1f} x EBITDA {_y_N1} ({fmt_int(_ebitda_N1)} kr) = {fmt_int(_tv)} kr"
-    + (f", minus banklån ved utgangen av {_y_N}: {fmt_int(_gjeld_N)} kr." if _gjeld_N > 0 else " (ingen gjeld å trekke fra i denne visningen).")
-    + (" I SFaaS-visningen er dette nåverdien av konsesjonen/driften isolert - anlegget leies og ligger hos utleier."
-       if not konsolidert else " I Konsolidert inngår investeringen i anlegget i kontantstrømmen.")
+    + (f". CAPEX {fmt_int(_capex_t0)} kr trekkes fra på t=0 (udiskontert); restgjeld trekkes IKKE fra i tillegg - "
+       "med CAPEX fullt utgiftsført er lånet allerede dekket i kontantstrømmen (totalkapitalmodellen)."
+       if konsolidert else ". I SFaaS-visningen er dette nåverdien av konsesjonen/driften isolert - anlegget leies og ligger hos utleier.")
     + " Innskutt egenkapital er ikke en kontantstrøm til totalkapitalen og inngår ikke."
 )
 _m1, _m2, _m3, _m4 = st.columns(4)
 _m1.metric("Nåverdi FCFF år 1-N", f"{fmt_int(_pv_fcff)} kr")
 _m2.metric(f"Nåverdi sluttverdi (år {_N})", f"{fmt_int(_pv_tv)} kr")
-_m3.metric("Nåverdi netto gjeld ved horisont", f"-{fmt_int(_pv_gjeld)} kr")
-_m4.metric("NÅVERDI TOTALT (EV)", f"{fmt_int(_npv)} kr")
+_m3.metric("CAPEX (t=0)" if konsolidert else "Gjeld", f"-{fmt_int(_capex_t0)} kr")
+_m4.metric("NETTO NÅVERDI", f"{fmt_int(_npv)} kr")
 _dcf_vis = _dcf_df.copy()
 _dcf_vis["periode"] = _dcf_vis["periode"].astype(str) + " (t=" + _dcf_vis["t"].astype(str) + ")"
+# Sluttverdi-kolonne (t = N): multippel x EBITDA år N+1, minus netto gjeld ved horisont, diskontert med faktor for år N
+_dcf_vis = pd.concat([_dcf_vis, pd.DataFrame([{
+    "periode": f"Sluttverdi {_y_N1} x{dcf_multippel:.1f} (t={_N})", "t": _N, "ebitda_kr": _ebitda_N1,
+    "avskrivninger_kr": float("nan"), "ebit_kr": float("nan"), "skatt_kr": float("nan"), "investeringer_kr": float("nan"),
+    "endring_arbeidskapital_kr": float("nan"), "fcff_kr": _tv,
+    "diskonteringsfaktor": 1.0 / (1.0 + dcf_r) ** _N, "naverdi_kr": _pv_tv,
+}] + ([{
+    "periode": "CAPEX (t=0)", "t": 0, "ebitda_kr": float("nan"), "avskrivninger_kr": float("nan"), "ebit_kr": float("nan"),
+    "skatt_kr": float("nan"), "investeringer_kr": -_capex_t0, "endring_arbeidskapital_kr": float("nan"),
+    "fcff_kr": -_capex_t0, "diskonteringsfaktor": 1.0, "naverdi_kr": -_capex_t0,
+}] if konsolidert else []) + [{
+    "periode": "NETTO NÅVERDI", "t": 0, "ebitda_kr": float("nan"), "avskrivninger_kr": float("nan"), "ebit_kr": float("nan"),
+    "skatt_kr": float("nan"), "investeringer_kr": float("nan"), "endring_arbeidskapital_kr": float("nan"),
+    "fcff_kr": float("nan"), "diskonteringsfaktor": float("nan"), "naverdi_kr": _npv,
+}])], ignore_index=True)
 _dcf_fmt = with_thousands(_dcf_vis.drop(columns=["t"]), int_cols=[],
                           float_cols=[c for c in _dcf_vis.columns if c not in ("periode", "t", "diskonteringsfaktor")], float_decimals=0)
-_dcf_fmt["diskonteringsfaktor"] = _dcf_vis["diskonteringsfaktor"].apply(lambda x: fmt_float(x, 4))
+_dcf_fmt["diskonteringsfaktor"] = _dcf_vis["diskonteringsfaktor"].apply(lambda x: fmt_float(x, 4) if pd.notna(x) else "")
+_dcf_fmt = _dcf_fmt.fillna("")
 _dcf_wide = _dcf_fmt.set_index("periode").T
 _dcf_wide.index.name = "Felt"
 _dcf_wide = _dcf_wide.rename(index={
     "ebitda_kr": "EBITDA (kr)", "avskrivninger_kr": "Avskrivninger (kr)", "ebit_kr": "EBIT (kr)",
     "skatt_kr": "Skatt på EBIT, med fremførbart underskudd (kr)", "investeringer_kr": "Investeringer (kr)",
-    "endring_arbeidskapital_kr": "Endring arbeidskapital (kr)", "fcff_kr": "Fri kontantstrøm til totalkapitalen, FCFF (kr)",
+    "endring_arbeidskapital_kr": "Endring arbeidskapital (kr)", "fcff_kr": "Fri kontantstrøm til totalkapitalen, FCFF / sluttverdi (kr)",
     "diskonteringsfaktor": f"Diskonteringsfaktor 1/(1+{dcf_r*100:.2f} %)^t", "naverdi_kr": "Nåverdi (kr)",
 })
 _render_table(_dcf_wide, highlight_groups=[
-    {"rows": ["Fri kontantstrøm til totalkapitalen, FCFF (kr)"], "bg": "#fbf3e6", "text": "#9a6b2a"},
+    {"rows": ["Fri kontantstrøm til totalkapitalen, FCFF / sluttverdi (kr)"], "bg": "#fbf3e6", "text": "#9a6b2a"},
     {"rows": ["Nåverdi (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
 ], fixed_label_width_px=KONSOLIDERT_FELT_BREDDE_PX + 120, fixed_data_col_width_px=KONSOLIDERT_KOL_BREDDE_PX)
+
+# ---- Fossefall: nåverdi -> netto nåverdi egenkapital. I SFaaS-visningen
+#      vises tre side om side (oppdretter/konsesjon, utleier/rigg, konsolidert)
+#      lenger ned når utleiers tall er beregnet; i Konsolidert bare den ene.
+_ff_oppdretter = [
+    ("Nåverdi kontantstrøm\når 1-10", _pv_fcff, False),
+    ("Nåverdi terminalverdi\n(x{:.1f})".format(dcf_multippel), _pv_tv, False),
+] + ([("CAPEX (t=0)", -_capex_t0, False)] if konsolidert else []) + [
+    ("Netto nåverdi", _npv, True),
+]
+if konsolidert:
+    st.markdown("**Nåverdi i fossefall - Konsolidert (NOS eier riggen)**")
+    _fig_ff, _ax_ff = plt.subplots(figsize=(9, 5.5))
+    _naverdi_fossefall(_ax_ff, _ff_oppdretter, "Konsolidert: konsesjon + rigg (CAPEX på t=0)")
+    _fig_ff.tight_layout()
+    st.pyplot(_fig_ff, use_container_width=False)
+    plt.close(_fig_ff)
 
 if not konsolidert:
     # (Skjules i "Konsolidert"-visningen - der er kapitalleien 0 og det finnes ingen utleier.)
@@ -3917,6 +3996,154 @@ if not konsolidert:
         st.caption("Reforhandlinger valgt i sidepanelet (13.1 Kapitalleie): " + "; ".join(
             f"{r['ar']}: {fmt_int(r['gammel_131'])} → {fmt_int(r['ny_131'])} kr ({r['andel']*100:.0f} % av gapet til "
             f"{fmt_int(r['krav_131'])}), ny sats {r['sats_pct']*100:.2f} %" for r in kapitalleie_reprising))
+
+    # ----------------------------------------------------------------------
+    # NÅVERDI (DCF) - UTLEIER: verdien av å eie riggen under SFaaS. Samme
+    # totalkapitalmodell og CAPM-krav som for oppdretter (sidepanelet).
+    # FCFF_t = EBITDA_t - skatt på EBIT_t (fremførbart underskudd, UTEN renter)
+    #          - vedlikeholdsinvesteringer_t;  CAPEX i år 0 (t=0, udiskontert)
+    # EV  = sum FCFF_t/(1+r)^t + [multippel x EBITDA_(N+1)] / (1+r)^N
+    # NPV = EV - CAPEX;  Egenkapitalverdi = EV - banklån ved horisont (PV).
+    # ----------------------------------------------------------------------
+    st.subheader("Nåverdi (DCF) - utleiers kontantstrøm: verdien av å eie riggen under SFaaS")
+    _ur = utleier_regnskap["resultat"].set_index("periode")
+    _uc = utleier_regnskap["kontantstrom"].set_index("periode")
+    _ub = utleier_regnskap["balanse"].set_index("periode")
+    _ut_dcf_ar = [y for y in range(_dcf_y0, _dcf_y0 + dcf_horisont) if y in _ur.index]
+    _ut_rows, _ut_fremf = [], 0.0
+    for i, y in enumerate(_ut_dcf_ar, start=1):
+        ebitda = float(_ur.loc[y, "ebitda_kr"]); avskr = float(_ur.loc[y, "avskrivninger_kr"]); ebit = ebitda - avskr
+        grunnlag = ebit - _ut_fremf
+        if grunnlag > 0:
+            skatt, _ut_fremf = grunnlag * skattesats_pct, 0.0
+        else:
+            skatt, _ut_fremf = 0.0, -grunnlag
+        vedl = float(-_uc.loc[y, "vedlikeholdsinvestering_kr"])
+        fcff = ebitda - skatt - vedl
+        dfak = 1.0 / (1.0 + dcf_r) ** i
+        _ut_rows.append({"periode": y, "t": i, "ebitda_kr": ebitda, "avskrivninger_kr": avskr, "ebit_kr": ebit,
+                         "skatt_kr": -skatt, "vedlikeholdsinvestering_kr": -vedl, "fcff_kr": fcff,
+                         "diskonteringsfaktor": dfak, "naverdi_kr": fcff * dfak})
+    _ut_dcf_df = pd.DataFrame(_ut_rows)
+    _uN = len(_ut_dcf_ar); _uy_N = _ut_dcf_ar[-1]; _uy_N1 = _uy_N + 1
+    _u_ebitda_N1 = float(_ur.loc[_uy_N1, "ebitda_kr"]) if _uy_N1 in _ur.index else float(_ur.loc[_uy_N, "ebitda_kr"])
+    _u_tv = dcf_multippel * _u_ebitda_N1
+    _u_pv_fcff = float(_ut_dcf_df["naverdi_kr"].sum())
+    _u_pv_tv = _u_tv / (1.0 + dcf_r) ** _uN
+    _u_ev = _u_pv_fcff + _u_pv_tv
+    _u_npv = _u_ev - capex
+    _u_gjeld_N = float(_ub.loc[_uy_N, "banklan_kr"]) if _uy_N in _ub.index else 0.0
+    _u_pv_gjeld = _u_gjeld_N / (1.0 + dcf_r) ** _uN
+    st.caption(
+        f"Avkastningskrav (ubelånt CAPM, samme som for oppdretter): {dcf_r*100:.2f} %. Horisont {_uN} år "
+        f"({_ut_dcf_ar[0]}-{_uy_N}), diskontert til 1. januar {_dcf_y0}. FCFF = EBITDA (= kapitalleien 13.1, inkl. "
+        f"eventuelle TC-reforhandlinger) - skatt på EBIT - vedlikeholdsinvesteringer. Sluttverdi = {dcf_multippel:.1f} x "
+        f"EBITDA {_uy_N1} ({fmt_int(_u_ebitda_N1)} kr) = {fmt_int(_u_tv)} kr. Finansieringen (banklån, renter, "
+        "refinansiering) holdes utenfor - det er poenget med totalkapitalmodellen: verdien av riggen er uavhengig av "
+        "hvordan den er finansiert. Refinansieringsprovenyene som løfter IRR er derfor ikke verdi i seg selv."
+    )
+    _u1, _u2, _u3, _u4 = st.columns(4)
+    _u1.metric("Nåverdi FCFF år 1-N", f"{fmt_int(_u_pv_fcff)} kr")
+    _u2.metric(f"Nåverdi sluttverdi (år {_uN})", f"{fmt_int(_u_pv_tv)} kr")
+    _u3.metric("Nåverdi av riggen (EV)", f"{fmt_int(_u_ev)} kr")
+    _u4.metric("NPV = EV - CAPEX", f"{fmt_int(_u_npv)} kr", help="Positiv = leien gir mer enn avkastningskravet på investeringen.")
+    st.caption(f"Break-even kapitalleie-sats (NPV = 0) ≈ {(capex / _u_ev * kapitalleie_pct * 100) if _u_ev > 0 else 0:.1f} % "
+               "(proporsjonal tilnærming - EBITDA er lineær i satsen). Finansieringen (banklån, refinansiering) endrer "
+               "fordelingen mellom eier og bank, ikke riggens verdi.")
+    _ut_dcf_vis = _ut_dcf_df.copy()
+    _ut_dcf_vis["periode"] = _ut_dcf_vis["periode"].astype(str) + " (t=" + _ut_dcf_vis["t"].astype(str) + ")"
+    _ut_dcf_vis = pd.concat([_ut_dcf_vis, pd.DataFrame([{
+        "periode": f"Sluttverdi {_uy_N1} x{dcf_multippel:.1f} (t={_uN})", "t": _uN, "ebitda_kr": _u_ebitda_N1,
+        "avskrivninger_kr": float("nan"), "ebit_kr": float("nan"), "skatt_kr": float("nan"),
+        "vedlikeholdsinvestering_kr": float("nan"), "fcff_kr": _u_tv,
+        "diskonteringsfaktor": 1.0 / (1.0 + dcf_r) ** _uN, "naverdi_kr": _u_pv_tv,
+    }, {
+        "periode": "EV (sum nåverdi)", "t": 0, "ebitda_kr": float("nan"), "avskrivninger_kr": float("nan"), "ebit_kr": float("nan"),
+        "skatt_kr": float("nan"), "vedlikeholdsinvestering_kr": float("nan"), "fcff_kr": float("nan"),
+        "diskonteringsfaktor": float("nan"), "naverdi_kr": _u_ev,
+    }, {
+        "periode": "CAPEX (t=0)", "t": 0, "ebitda_kr": float("nan"), "avskrivninger_kr": float("nan"), "ebit_kr": float("nan"),
+        "skatt_kr": float("nan"), "vedlikeholdsinvestering_kr": float("nan"), "fcff_kr": -capex,
+        "diskonteringsfaktor": 1.0, "naverdi_kr": -capex,
+    }, {
+        "periode": "NPV = EV - CAPEX", "t": 0, "ebitda_kr": float("nan"), "avskrivninger_kr": float("nan"), "ebit_kr": float("nan"),
+        "skatt_kr": float("nan"), "vedlikeholdsinvestering_kr": float("nan"), "fcff_kr": float("nan"),
+        "diskonteringsfaktor": float("nan"), "naverdi_kr": _u_npv,
+    }])], ignore_index=True)
+    _ut_dcf_fmt = with_thousands(_ut_dcf_vis.drop(columns=["t"]), int_cols=[],
+                                 float_cols=[c for c in _ut_dcf_vis.columns if c not in ("periode", "t", "diskonteringsfaktor")], float_decimals=0)
+    _ut_dcf_fmt["diskonteringsfaktor"] = _ut_dcf_vis["diskonteringsfaktor"].apply(lambda x: fmt_float(x, 4) if pd.notna(x) else "")
+    _ut_dcf_fmt = _ut_dcf_fmt.fillna("")
+    _ut_dcf_wide = _ut_dcf_fmt.set_index("periode").T
+    _ut_dcf_wide.index.name = "Felt"
+    _ut_dcf_wide = _ut_dcf_wide.rename(index={
+        "ebitda_kr": "EBITDA = kapitalleie 13.1 (kr)", "avskrivninger_kr": "Avskrivninger (kr)", "ebit_kr": "EBIT (kr)",
+        "skatt_kr": "Skatt på EBIT, med fremførbart underskudd (kr)", "vedlikeholdsinvestering_kr": "Vedlikeholdsinvesteringer (kr)",
+        "fcff_kr": "Fri kontantstrøm til totalkapitalen, FCFF / sluttverdi (kr)",
+        "diskonteringsfaktor": f"Diskonteringsfaktor 1/(1+{dcf_r*100:.2f} %)^t", "naverdi_kr": "Nåverdi (kr)",
+    })
+    _render_table(_ut_dcf_wide, highlight_groups=[
+        {"rows": ["Fri kontantstrøm til totalkapitalen, FCFF / sluttverdi (kr)"], "bg": "#fbf3e6", "text": "#9a6b2a"},
+        {"rows": ["Nåverdi (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
+    ], fixed_label_width_px=KONSOLIDERT_FELT_BREDDE_PX + 120, fixed_data_col_width_px=KONSOLIDERT_KOL_BREDDE_PX)
+
+    # ---- TRE FOSSEFALL side om side: (1) oppdretter/konsesjonen under SFaaS,
+    #      (2) utleier/riggen, (3) konsolidert (NOS eier riggen selv).
+    #      Konsolidert regnes her direkte fra de to andre: EBITDA_kons = EBITDA_oppdretter
+    #      + kapitalleie 13.1; avskrivninger og vedlikehold som hos utleier; CAPEX
+    #      i år 1; samme banklån ved horisont som utleier. Samme metode som i
+    #      Konsolidert-visningen (identisk resultat, se den for detaljene).
+    st.markdown("**Nåverdi i fossefall - de tre investeringsalternativene**")
+    st.caption(
+        "Totalkapitalmodellen: nåverdi av kontantstrøm år 1-10 + nåverdi av terminalverdi - CAPEX på t=0 (der "
+        "riggen bygges) = netto nåverdi. Gjeld trekkes ikke fra: med CAPEX fullt utgiftsført er lånet allerede "
+        "dekket i kontantstrømmen, og finansieringen påvirker ikke verdien av eiendelen. Oppdretter under SFaaS "
+        "har verken CAPEX eller gjeld. Konsolidert: NOS bygger riggen selv og slipper leien."
+    )
+    _k_rows, _k_fremf, _k_nwc_forr = [], 0.0, 0.0
+    _u_vedl = {int(y): float(-_uc.loc[y, "vedlikeholdsinvestering_kr"]) for y in _uc.index}
+    _u_avskr = {int(y): float(_ur.loc[y, "avskrivninger_kr"]) for y in _ur.index}
+    for i, y in enumerate(_dcf_ar, start=1):
+        ebitda_k = float(_dcf_res.loc[y, "ebitda_kr"]) + float(_ur.loc[y, "ebitda_kr"]) if y in _ur.index else float(_dcf_res.loc[y, "ebitda_kr"])
+        ebit_k = ebitda_k - _u_avskr.get(y, 0.0)
+        grunnlag = ebit_k - _k_fremf
+        if grunnlag > 0:
+            skatt_k, _k_fremf = grunnlag * skattesats, 0.0
+        else:
+            skatt_k, _k_fremf = 0.0, -grunnlag
+        nwc = float(_dcf_bal.loc[y, "kundefordringer"] + _dcf_bal.loc[y, "biologisk_eiendel"] - _dcf_bal.loc[y, "leverandorgjeld"]) if y in _dcf_bal.index else _k_nwc_forr
+        d_nwc = nwc - _k_nwc_forr; _k_nwc_forr = nwc
+        invest_k = _u_vedl.get(y, 0.0)   # CAPEX på t=0, se under
+        fcff_k = ebitda_k - skatt_k - invest_k - d_nwc
+        _k_rows.append(fcff_k / (1.0 + dcf_r) ** i)
+    _k_pv_fcff = float(sum(_k_rows))
+    _k_ebitda_N1 = (float(_dcf_res.loc[_y_N1, "ebitda_kr"]) + float(_ur.loc[_y_N1, "ebitda_kr"])) if (_y_N1 in _dcf_res.index and _y_N1 in _ur.index) else _ebitda_N1 + _u_ebitda_N1
+    _k_pv_tv = dcf_multippel * _k_ebitda_N1 / (1.0 + dcf_r) ** _N
+    _k_npv = _k_pv_fcff + _k_pv_tv - capex
+    _ff_utleier = [
+        ("Nåverdi kontantstrøm\når 1-10", _u_pv_fcff, False),
+        ("Nåverdi terminalverdi\n(x{:.1f})".format(dcf_multippel), _u_pv_tv, False),
+        ("CAPEX (t=0)", -capex, False),
+        ("Netto nåverdi", _u_npv, True),
+    ]
+    _ff_kons = [
+        ("Nåverdi kontantstrøm\når 1-10", _k_pv_fcff, False),
+        ("Nåverdi terminalverdi\n(x{:.1f})".format(dcf_multippel), _k_pv_tv, False),
+        ("CAPEX (t=0)", -capex, False),
+        ("Netto nåverdi", _k_npv, True),
+    ]
+    _fig3, _axs = plt.subplots(1, 3, figsize=(20, 6))
+    _naverdi_fossefall(_axs[0], _ff_oppdretter, "1) Oppdretter (NOS) - konsesjonen, leier riggen (SFaaS)")
+    _naverdi_fossefall(_axs[1], _ff_utleier, "2) Utleier (Aqualoop) - riggen")
+    _naverdi_fossefall(_axs[2], _ff_kons, "3) Konsolidert - NOS eier riggen selv")
+    _fig3.tight_layout()
+    st.pyplot(_fig3, use_container_width=True)
+    plt.close(_fig3)
+    st.caption(
+        f"Netto nåverdi: oppdretter {fmt_int(_npv)} kr + utleier {fmt_int(_u_npv)} kr = {fmt_int(_npv + _u_npv)} kr, "
+        f"mot konsolidert {fmt_int(_k_npv)} kr. Avviket er skatteeffekten av å samle det i én enhet (avskrivningene "
+        "møter oppdrettsoverskuddet fra dag én). Leien flytter verdi mellom partene, men skaper den ikke."
+    )
 
     if _vis_irr:
         # ============================================================================
