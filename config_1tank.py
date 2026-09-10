@@ -447,3 +447,17 @@ RESULTAT_DEFAULTS = {
     "finanskostnader_nok_per_ar": 0.0,
     "skattesats_pct": 0.22,
 }
+
+
+# ----------------------------------------------------------------------
+# 10. NÅVERDI (DCF) - oppdretters kontantstrøm, totalkapitalmodellen (ubelånt)
+#     BEKREFTET av bruker: rf 4 %, markedspremie 5 %, eiendelsbeta 0,80
+#     -> r = 4 % + 0,80 x 5 % = 8,0 %. Sluttverdi 10x EBITDA (justerbar).
+# ----------------------------------------------------------------------
+DCF_DEFAULTS = {
+    "rf_pct": 0.04,
+    "mp_pct": 0.05,
+    "beta": 0.80,
+    "horisont_ar": 10,
+    "ev_ebitda": 10.0,
+}

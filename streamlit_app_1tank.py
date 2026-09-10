@@ -1135,6 +1135,22 @@ with st.sidebar:
         txt = st.text_input(f"{fc['navn']} ({enhet})", key=widget_key, on_change=_reformat_fastkost)
         fixed_cost_prices[fc["id"]] = (parse_number(txt) / fastkost_divisor) if txt.strip() else None
 
+    with st.expander("Nåverdi (DCF) - oppdretters kontantstrøm", expanded=False):
+        _dcf = getattr(default_config, "DCF_DEFAULTS", {})
+        st.caption("Totalkapitalmodellen (ubelånt): fri kontantstrøm til totalkapitalen (EBITDA - skatt på EBIT - "
+                   "investeringer - endring arbeidskapital) diskonteres med ubelånt avkastningskrav fra CAPM: "
+                   "r = rf + eiendelsbeta x markedspremie. Sluttverdi = EV/EBITDA x EBITDA året ETTER horisonten; "
+                   "netto gjeld ved horisonten trekkes fra (0 i SFaaS, banklån i Konsolidert).")
+        d1, d2, d3 = st.columns(3)
+        dcf_rf_pct = parse_number(d1.text_input("Risikofri rente (%)", value=fmt_float(_dcf.get("rf_pct", 0.04) * 100, 2), key="dcf_rf"), 4.0) / 100.0
+        dcf_mp_pct = parse_number(d2.text_input("Markedspremie (%)", value=fmt_float(_dcf.get("mp_pct", 0.05) * 100, 2), key="dcf_mp"), 5.0) / 100.0
+        dcf_beta = parse_number(d3.text_input("Eiendelsbeta (ubelånt)", value=fmt_float(_dcf.get("beta", 0.80), 2), key="dcf_beta"), 0.80)
+        d4, d5 = st.columns(2)
+        dcf_horisont = int(d4.number_input("Horisont (år)", min_value=3, max_value=int(default_config.N_YEARS_TO_RUN), value=int(_dcf.get("horisont_ar", 10)), step=1, key="dcf_horisont"))
+        dcf_multippel = parse_number(d5.text_input("EV/EBITDA sluttverdi (x)", value=fmt_float(_dcf.get("ev_ebitda", 10.0), 1), key="dcf_mult"), 10.0)
+        dcf_r = dcf_rf_pct + dcf_beta * dcf_mp_pct
+        st.caption(f"→ Avkastningskrav totalkapital: {dcf_rf_pct*100:.2f} % + {dcf_beta:.2f} x {dcf_mp_pct*100:.2f} % = {dcf_r*100:.2f} %")
+
     with st.expander("Resultatregnskap - avskrivninger, finans, skatt", expanded=False):
         _rd = getattr(default_config, "RESULTAT_DEFAULTS", {})
         st.caption("Oppdretters EGNE poster under EBITDA. Anlegget eies av utleier (13. Leie er opex), "
@@ -3557,6 +3573,92 @@ if konsolidert:
     _op_terskler.append(("All innskutt egenkapital (CAPEX + operasjonell)", _ik_ek_inv + _ik_ek_oper))
 _ek_tilbakebetaling_graf(_op_dates, list(_bal_m["kontanter"].values), _op_terskler,
                          "Oppdretter (NOS) - kontanter i balansen mot innskutt egenkapital", "Kontanter i balansen (MNOK)")
+
+# ----------------------------------------------------------------------
+# NÅVERDI (DCF) - oppdretters frie kontantstrøm til totalkapitalen. I SFaaS
+# er dette verdien av konsesjonen/driften isolert (anlegget leies).
+# FCFF_t = EBITDA_t - skatt på EBIT_t (fremførbart underskudd) - investeringer_t
+#          - endring i arbeidskapital_t (kundefordringer + biologisk eiendel
+#          - leverandørgjeld, fra balansen 31.12)
+# EV = sum FCFF_t/(1+r)^t, t = 1..N (år 1 = startåret, diskontert til 1.1 startår)
+#      + [multippel x EBITDA_(N+1) - netto gjeld_N] / (1+r)^N
+# ----------------------------------------------------------------------
+st.subheader("Nåverdi (DCF) - oppdretters kontantstrøm, totalkapitalmodellen")
+_dcf_res = build_resultatregnskap(cfg, cashflow, fixed_costs_weekly, matchet_kostnad,
+                                  cfg.START_ISO_YEAR, cfg.START_ISO_WEEK, "ar").set_index("periode")
+_dcf_bal = balanse.copy()
+_dcf_bal["_ar"] = pd.to_datetime(_dcf_bal["dato"]).dt.isocalendar().year
+_dcf_bal = _dcf_bal.groupby("_ar").last()
+_dcf_y0 = int(cfg.START_ISO_YEAR)
+_dcf_ar = [y for y in range(_dcf_y0, _dcf_y0 + dcf_horisont) if y in _dcf_res.index]
+_dcf_rows, _fremf, _nwc_forrige = [], 0.0, 0.0
+_ek_invest_tot = 0.0
+for i, y in enumerate(_dcf_ar, start=1):
+    ebitda = float(_dcf_res.loc[y, "ebitda_kr"])
+    avskr = float(_dcf_res.loc[y, "avskrivninger_kr"])
+    ebit = ebitda - avskr
+    grunnlag = ebit - _fremf
+    if grunnlag > 0:
+        skatt, _fremf = grunnlag * skattesats, 0.0
+    else:
+        skatt, _fremf = 0.0, -grunnlag
+    if y in _dcf_bal.index:
+        nwc = float(_dcf_bal.loc[y, "kundefordringer"] + _dcf_bal.loc[y, "biologisk_eiendel"] - _dcf_bal.loc[y, "leverandorgjeld"])
+    else:
+        nwc = _nwc_forrige
+    d_nwc = nwc - _nwc_forrige
+    _nwc_forrige = nwc
+    invest = 0.0
+    if konsolidert and cfg.EIER_UKE is not None:
+        _e = cfg.EIER_UKE
+        _e_ar = _e[pd.to_datetime(_e["dato"]).dt.isocalendar().year == y]
+        invest = float(_e_ar["capex_kr"].sum() + _e_ar["vedlikehold_kr"].sum())
+    fcff = ebitda - skatt - invest - d_nwc
+    df_faktor = 1.0 / (1.0 + dcf_r) ** i
+    _dcf_rows.append({"periode": y, "t": i, "ebitda_kr": ebitda, "avskrivninger_kr": avskr, "ebit_kr": ebit,
+                      "skatt_kr": -skatt, "investeringer_kr": -invest, "endring_arbeidskapital_kr": -d_nwc,
+                      "fcff_kr": fcff, "diskonteringsfaktor": df_faktor, "naverdi_kr": fcff * df_faktor})
+_dcf_df = pd.DataFrame(_dcf_rows)
+_N = len(_dcf_ar)
+_y_N, _y_N1 = _dcf_ar[-1], _dcf_ar[-1] + 1
+_ebitda_N1 = float(_dcf_res.loc[_y_N1, "ebitda_kr"]) if _y_N1 in _dcf_res.index else float(_dcf_res.loc[_y_N, "ebitda_kr"])
+_tv = dcf_multippel * _ebitda_N1
+_gjeld_N = float(_dcf_bal.loc[_y_N, "banklan"]) if ("banklan" in _dcf_bal.columns and _y_N in _dcf_bal.index) else 0.0
+_pv_fcff = float(_dcf_df["naverdi_kr"].sum())
+_pv_tv = _tv / (1.0 + dcf_r) ** _N
+_pv_gjeld = _gjeld_N / (1.0 + dcf_r) ** _N
+_npv = _pv_fcff + _pv_tv - _pv_gjeld
+st.caption(
+    f"Avkastningskrav (ubelånt CAPM): {dcf_rf_pct*100:.2f} % + {dcf_beta:.2f} x {dcf_mp_pct*100:.2f} % = "
+    f"{dcf_r*100:.2f} %. Horisont {_N} år ({_dcf_ar[0]}-{_y_N}), diskontert til 1. januar {_dcf_y0}. "
+    f"Sluttverdi = {dcf_multippel:.1f} x EBITDA {_y_N1} ({fmt_int(_ebitda_N1)} kr) = {fmt_int(_tv)} kr"
+    + (f", minus banklån ved utgangen av {_y_N}: {fmt_int(_gjeld_N)} kr." if _gjeld_N > 0 else " (ingen gjeld å trekke fra i denne visningen).")
+    + (" I SFaaS-visningen er dette nåverdien av konsesjonen/driften isolert - anlegget leies og ligger hos utleier."
+       if not konsolidert else " I Konsolidert inngår investeringen i anlegget i kontantstrømmen.")
+    + " Innskutt egenkapital er ikke en kontantstrøm til totalkapitalen og inngår ikke."
+)
+_m1, _m2, _m3, _m4 = st.columns(4)
+_m1.metric("Nåverdi FCFF år 1-N", f"{fmt_int(_pv_fcff)} kr")
+_m2.metric(f"Nåverdi sluttverdi (år {_N})", f"{fmt_int(_pv_tv)} kr")
+_m3.metric("Nåverdi netto gjeld ved horisont", f"-{fmt_int(_pv_gjeld)} kr")
+_m4.metric("NÅVERDI TOTALT (EV)", f"{fmt_int(_npv)} kr")
+_dcf_vis = _dcf_df.copy()
+_dcf_vis["periode"] = _dcf_vis["periode"].astype(str) + " (t=" + _dcf_vis["t"].astype(str) + ")"
+_dcf_fmt = with_thousands(_dcf_vis.drop(columns=["t"]), int_cols=[],
+                          float_cols=[c for c in _dcf_vis.columns if c not in ("periode", "t", "diskonteringsfaktor")], float_decimals=0)
+_dcf_fmt["diskonteringsfaktor"] = _dcf_vis["diskonteringsfaktor"].apply(lambda x: fmt_float(x, 4))
+_dcf_wide = _dcf_fmt.set_index("periode").T
+_dcf_wide.index.name = "Felt"
+_dcf_wide = _dcf_wide.rename(index={
+    "ebitda_kr": "EBITDA (kr)", "avskrivninger_kr": "Avskrivninger (kr)", "ebit_kr": "EBIT (kr)",
+    "skatt_kr": "Skatt på EBIT, med fremførbart underskudd (kr)", "investeringer_kr": "Investeringer (kr)",
+    "endring_arbeidskapital_kr": "Endring arbeidskapital (kr)", "fcff_kr": "Fri kontantstrøm til totalkapitalen, FCFF (kr)",
+    "diskonteringsfaktor": f"Diskonteringsfaktor 1/(1+{dcf_r*100:.2f} %)^t", "naverdi_kr": "Nåverdi (kr)",
+})
+_render_table(_dcf_wide, highlight_groups=[
+    {"rows": ["Fri kontantstrøm til totalkapitalen, FCFF (kr)"], "bg": "#fbf3e6", "text": "#9a6b2a"},
+    {"rows": ["Nåverdi (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
+], fixed_label_width_px=KONSOLIDERT_FELT_BREDDE_PX + 120, fixed_data_col_width_px=KONSOLIDERT_KOL_BREDDE_PX)
 
 if not konsolidert:
     # (Skjules i "Konsolidert"-visningen - der er kapitalleien 0 og det finnes ingen utleier.)
