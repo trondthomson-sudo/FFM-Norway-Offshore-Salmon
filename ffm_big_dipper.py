@@ -1,16 +1,12 @@
 """
-ffm_big_dipper.py - FP&A-modell for Aqualoop Big Dipper og Kvidul post-smolt
+streamlit_app_1tank.py - Biologibasert finansiell oppdrettsmodell (1 tank)
 ------------------------------------------------------------------------------
-Tre visninger (radioknapp i sidepanelet):
-  - SFaaS oppdrett   : NOS leier Big Dipper av Aqualoop (scheduler_multitank.py)
-  - Konsolidert      : samme modell, NOS eier riggen selv
-  - Kvidul post-smolt: Kvidul AS sitt landanlegg, 30 g -> 750 g post-smolt til
-                       Big Dipper-innsettene (scheduler_kvidul.py, config_kvidul.py)
-Ressursregnskap, kontantstrøm, resultat, balanse og kapitalbehov bygges av
-resource_ledger.py oppå den scheduleren visningen bruker.
-(Tidligere filnavn: streamlit_app_1tank.py.)
+Startpunktet i den nye, større modellen: én tank, N oppskrifter i rotasjon,
+solgt direkte som postsmolt. Viser BÅDE produksjonsplanen OG et
+ressursregnskap (COGS-linjer, kg WFE-basert) per kohort - se
+scheduler_1tank.py og resource_ledger.py for selve logikken.
 
-Run:  python -m streamlit run ffm_big_dipper.py
+Run:  python -m streamlit run streamlit_app_1tank.py
 """
 import io
 import re
@@ -23,16 +19,16 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 import config_1tank as bd_config
-import config_kvidul as kvidul_config
-default_config = bd_config   # byttes til kvidul_config når visning "Kvidul post-smolt" er valgt (se sidepanelet)
+import config_postsmolt as postsmolt_config
+default_config = bd_config   # byttes til postsmolt_config når visning "Post-smolt landanlegg" er valgt (se sidepanelet)
 from growth_tables import GrowthTables
 from scheduler_1tank import build_1tank_schedule, week_label, monday_of_week
 from scheduler_multitank import build_multitank_schedule
-from scheduler_kvidul import build_kvidul_schedule, trinn_sammendrag
+from scheduler_postsmolt import build_postsmolt_schedule, trinn_sammendrag
 
 # Postsmolt-visningen er midlertidig skjult for investorpresentasjoner
 # (bekreftet av bruker). All kode beholdes - sett True for å vise den igjen.
-KVIDUL_VALG = "Kvidul post-smolt"   # tredje visning: Kvidul AS sitt eget post-smolt-anlegg (se config_kvidul.py)
+LANDANLEGG_VALG = "Post-smolt landanlegg"   # tredje visning: post-smolt-leverandørens eget landanlegg (se config_postsmolt.py)
 from resource_ledger import (
     build_resource_ledger, summarize_by_cohort, summarize_by_month, summarize_by_year,
     build_monthly_overview, build_cashflow_ledger, summarize_cashflow_by_period, build_per_kg,
@@ -427,7 +423,7 @@ def _build_balanse_breakdown(batch_ukentlig: pd.DataFrame, matchet_kostnad: pd.D
     Balansen er en SNAPSHOT (beholdning), ikke en flow (strøm) - så for
     måneds-/årsvisning tas SISTE ukes verdi i perioden, ikke en sum over
     perioden (samme prinsipp som build_balanse() sin egen måneds-/
-    årsgruppering lenger nede i ffm_big_dipper.py)."""
+    årsgruppering lenger nede i streamlit_app_1tank.py)."""
     alle_uker_labels = [u for u, _ in all_weeks_uke_dato]
     uke_til_dato = dict(all_weeks_uke_dato)
 
@@ -684,12 +680,12 @@ def _render_expandable_kontantstrom(wide_df: pd.DataFrame, highlight_groups: lis
 
 
 st.set_page_config(page_title="Norway Offshore Salmon", layout="wide")
-st.title("Kvidul AS - post-smolt til Big Dipper" if st.session_state.get("produkttype_valg") == KVIDUL_VALG
+st.title("Post-smolt landanlegg - leveranse til Big Dipper" if st.session_state.get("produkttype_valg") == LANDANLEGG_VALG
          else "Norway Offshore Salmon" + (" - Konsolidert (Aqualoop + NOS)" if st.session_state.get("produkttype_valg") == "Konsolidert" else ""))
 st.caption(
-    "Kvidul AS, Brennholmen fase 1: 30 g yngel -> 750 g post-smolt i tre karpooler (yngel/smolt/post-smolt), "
+    "Post-smolt landanlegg, fase 1: 30 g yngel -> 750 g post-smolt i tre karpooler (yngel/smolt/post-smolt), "
     "levert til NOS sine Big Dipper-innsett. Ressursregnskap, kontantstrøm, resultat, balanse og kapitalbehov "
-    "for Kvidul som eier av eget anlegg." if st.session_state.get("produkttype_valg") == KVIDUL_VALG else
+    "for landanlegget som eier av eget anlegg." if st.session_state.get("produkttype_valg") == LANDANLEGG_VALG else
     "Integrert produksjons- og finansmodell for Aqualoop Big Dipper: seks parallelle kohorter, "
     "batchvis utslakting, ressursregnskap 0-16, kontantstrøm, resultat, balanse og kapitalbehov for "
     "oppdretter (NOS) - og egne regnskaper, TC og IRR for SFaaS-aktøren (Aqualoop)."
@@ -742,7 +738,7 @@ with st.sidebar:
     def _preset_fra_config(cfgmod):
         """Felles nøkler som MÅ nullstilles ved bytte av visning, ellers lekker
         verdier (priser, faktorer, temperatur, 13.x-linjer, eierforutsetninger)
-        mellom Big Dipper og Kvidul via session_state (kjent fallgruve)."""
+        mellom Big Dipper og landanlegget via session_state (kjent fallgruve)."""
         d = {}
         for r in cfgmod.RESOURCES:
             pris = cfgmod.RESOURCE_PRICES_NOK.get(r["id"])
@@ -822,27 +818,27 @@ with st.sidebar:
                 "smolt_pris_modus": "Fiskeverditabell (interpolert)",
                 "salgspris_modus": "Fast pris (kr/kg)",
             },
-            # Kvidul = post-smolt-produsent på land, egen config (config_kvidul.py):
+            # landanlegget = post-smolt-produsent på land, egen config (config_postsmolt.py):
             # kohorter bakover fra ABD-innsett, kapasitet per trinn, eget anlegg.
-            KVIDUL_VALG: {
-                **_preset_fra_config(kvidul_config),
+            LANDANLEGG_VALG: {
+                **_preset_fra_config(postsmolt_config),
                 "n_batches": 1, "salgspris": "85",
-                "startw_0": float(kvidul_config.START_WEIGHT_KG * 1000), "smolt_0": fmt_int(kvidul_config.INNSETT_ANTALL_FAST),
-                "gw_0": 25, "cw_0": int(kvidul_config.VASKEUKER_ETTER_LEVERING), "sw_0": int(kvidul_config.SALGSVINDU_UKER),
-                "kv_n_abd": int(kvidul_config.N_ABD), "kv_lev_start_ar": int(kvidul_config.LEVERANSE_START_AR),
-                "kv_levert_antall": fmt_int(kvidul_config.LEVERT_ANTALL_PER_LEVERANSE),
-                "kv_levert_vekt_g": float(kvidul_config.LEVERT_VEKT_KG * 1000),
-                "kv_innsett_modus": "Automatisk (dekker dødeligheten)",
-                "kv_innsett_fast": fmt_int(kvidul_config.INNSETT_ANTALL_FAST),
-                "kv_fase2": False, "kv_fase2_overgang_g": int(kvidul_config.FASE2_OVERGANG_G),
-                "kv_banklan": fmt_int(kvidul_config.BANKLAN_NOK),
-                "startaar": int(kvidul_config.LEVERANSE_START_AR) - 1, "startuke": 1,
+                "startw_0": float(postsmolt_config.START_WEIGHT_KG * 1000), "smolt_0": fmt_int(postsmolt_config.INNSETT_ANTALL_FAST),
+                "gw_0": 25, "cw_0": int(postsmolt_config.VASKEUKER_ETTER_LEVERING), "sw_0": int(postsmolt_config.SALGSVINDU_UKER),
+                "ps_n_abd": int(postsmolt_config.N_ABD), "ps_lev_start_ar": int(postsmolt_config.LEVERANSE_START_AR),
+                "ps_levert_antall": fmt_int(postsmolt_config.LEVERT_ANTALL_PER_LEVERANSE),
+                "ps_levert_vekt_g": float(postsmolt_config.LEVERT_VEKT_KG * 1000),
+                "ps_innsett_modus": "Automatisk (dekker dødeligheten)",
+                "ps_innsett_fast": fmt_int(postsmolt_config.INNSETT_ANTALL_FAST),
+                "ps_fase2": False, "ps_fase2_overgang_g": int(postsmolt_config.FASE2_OVERGANG_G),
+                "ps_banklan": fmt_int(postsmolt_config.BANKLAN_NOK),
+                "startaar": int(postsmolt_config.LEVERANSE_START_AR) - 1, "startuke": 1,
                 "salgspris_modus": "Følger fiskeverditabellen",
             },
         }
         # Trinn-tabellen (data_editor) nullstilles ved å fjerne nøkkelen
-        if valg == KVIDUL_VALG:
-            st.session_state.pop("kv_trinn_editor", None)
+        if valg == LANDANLEGG_VALG:
+            st.session_state.pop("ps_trinn_editor", None)
         # Velgere i hovedvisningen hvis ALTERNATIVER avhenger av visningen
         # (kohort-/batch-ID-er, "Tank N"/"ABD N", år): en verdi fra forrige
         # visning finnes ikke i den nye listen -> Streamlit-feil. Fjernes så de
@@ -855,10 +851,10 @@ with st.sidebar:
         # overstyres til 0 % i beregningen - uten å røre verdien som står i
         # SFaaS. Bytte frem og tilbake nullstiller derfor ingenting.
         presets["Konsolidert"] = {}
-        # ... MEN kommer vi fra Kvidul-visningen, ligger Kvidul sine verdier i de
+        # ... MEN kommer vi fra landanleggsvisningen, ligger leverandørens verdier i de
         # delte feltene (CAPEX, priser, 13.x, temperatur) - da må Konsolidert
-        # sås på nytt fra SFaaS-presetet, ellers regner den på Kvidul-tall.
-        if valg == "Konsolidert" and st.session_state.get("_forrige_visning") == KVIDUL_VALG:
+        # sås på nytt fra SFaaS-presetet, ellers regner den på landanleggets tall.
+        if valg == "Konsolidert" and st.session_state.get("_forrige_visning") == LANDANLEGG_VALG:
             presets["Konsolidert"] = dict(presets["SFaaS oppdrett"])
         for key, verdi in presets.get(valg, {}).items():
             st.session_state[key] = verdi
@@ -868,18 +864,18 @@ with st.sidebar:
         # "Postsmolt 2x" er midlertidig SKJULT fra menyen (ikke slettet - all
         # kode, presets og logikk står urørt). Sett VIS_POSTSMOLT = True for å
         # ta den tilbake i menyen. Default-visning er SFaaS oppdrett.
-        "Produkttype / visning", options=["SFaaS oppdrett", "Konsolidert", KVIDUL_VALG],
+        "Produkttype / visning", options=["SFaaS oppdrett", "Konsolidert", LANDANLEGG_VALG],
         index=0,
         key="produkttype_valg", on_change=_bruk_produkttype_variant,
         help="'SFaaS oppdrett': Big Dipper slaktefisk, oppdretter (NOS) leier anlegget av Aqualoop - "
              "kapitalleie 12 %, egne regnskaper for utleier nederst. 'Konsolidert': identisk modell, men "
              "kapitalleie 0 % (Aqualoop + NOS sett under ett) og utleier-seksjonene skjult. Begge selges "
-             "som HOG (hodekappet vekt) i stedet for WFE (levendevekt). 'Kvidul post-smolt': Kvidul AS sitt eget "
-             "landanlegg (Brennholmen fase 1) som produserer 30 g -> 750 g post-smolt til Big Dipper-innsettene "
-             "- selges som WFE til fiskeverditabellen, Kvidul eier anlegget selv (ingen SFaaS).",
+             "som HOG (hodekappet vekt) i stedet for WFE (levendevekt). 'Post-smolt landanlegg': post-smolt-leverandørens eget "
+             "landanlegg (fase 1) som produserer 30 g -> 750 g post-smolt til Big Dipper-innsettene "
+             "- selges som WFE til fiskeverditabellen, leverandøren eier anlegget selv (ingen SFaaS).",
     )
-    kvidul = (produkttype_valg == KVIDUL_VALG)
-    default_config = kvidul_config if kvidul else bd_config   # styrer ALLE defaults i sidepanelet under
+    landanlegg = (produkttype_valg == LANDANLEGG_VALG)
+    default_config = postsmolt_config if landanlegg else bd_config   # styrer ALLE defaults i sidepanelet under
     # VIKTIG: on_change over kjører KUN når radioknappen faktisk ENDRES ved
     # klikk - laster du siden på nytt mens "Slaktefisk" (eller hvilket som
     # helst valg) allerede står valgt fra en tidligere økt, kjører IKKE
@@ -891,9 +887,9 @@ with st.sidebar:
         _bruk_produkttype_variant()
         st.rerun()
     produkttype = "Slaktefisk" if produkttype_valg in ("SFaaS oppdrett", "Konsolidert") else "Postsmolt"
-    # Kvidul eier anlegget selv -> samme regnskapsmessige oppsett som "Konsolidert"
+    # leverandøren eier anlegget selv -> samme regnskapsmessige oppsett som "Konsolidert"
     # (CAPEX/lån/avskrivning på egen balanse, ingen utleier-seksjoner, kapitalleie 0).
-    konsolidert = (produkttype_valg in ("Konsolidert", KVIDUL_VALG))
+    konsolidert = (produkttype_valg in ("Konsolidert", LANDANLEGG_VALG))
     if produkttype == "Slaktefisk":
         hog_faktor = st.number_input(
             "HOG-faktor (andel av WFE)", value=float(default_config.HOG_FAKTOR),
@@ -920,7 +916,7 @@ with st.sidebar:
         )
     salgspris_txt = st.text_input(
         f"Salgspris (kr/kg {'HOG' if produkttype == 'Slaktefisk' else 'WFE'} solgt)",
-        value=("85" if kvidul else "100"), key="salgspris",
+        value=("85" if landanlegg else "100"), key="salgspris",
         disabled=(salgspris_modus == "Følger fiskeverditabellen"),
     )
     if salgspris_modus == "Følger fiskeverditabellen":
@@ -974,11 +970,11 @@ with st.sidebar:
     fastkost_divisor = 1.0 if fastkost_periode == "Per uke" else 52.0
     fixed_cost_prices = {}
 
-    with st.expander("13. Anleggskostnader Kvidul (eget anlegg) - underlinjer" if kvidul else "13. Leie av Big Dipper-anlegg - underlinjer", expanded=False):
-        if kvidul:
-            st.caption("Kvidul eier anlegget: kapitalleie er 0, og linjene 13.3-13.10 er Kvidul sine EGNE driftskostnader "
-                       "for Brennholmen fase 1 (vedlikehold, rengjøring, desinfeksjon, lønn, forsikring, ADK). "
-                       "CAPEX brukes til avskrivning, forsikring og banklån (se 'Eier - Kvidul' under).")
+    with st.expander("13. Anleggskostnader landanlegget (eget anlegg) - underlinjer" if landanlegg else "13. Leie av Big Dipper-anlegg - underlinjer", expanded=False):
+        if landanlegg:
+            st.caption("leverandøren eier anlegget: kapitalleie er 0, og linjene 13.3-13.10 er leverandørens EGNE driftskostnader "
+                       "for fase 1 (vedlikehold, rengjøring, desinfeksjon, lønn, forsikring, ADK). "
+                       "CAPEX brukes til avskrivning, forsikring og banklån (se 'Eier - landanlegget' under).")
         else:
             st.caption("Summen av disse postene er det oppdretter skal betale Aqualoop - dette blir 13. Leie av Big Dipper-anlegg i faste kostnader under.")
         hx = dict(default_config.HEXACAGE_LEIE_DEFAULTS)
@@ -1181,15 +1177,15 @@ with st.sidebar:
                 holding_years_val = int(ux["holding_years"])
                 terminal_ebitda_multipel = ux["terminal_ebitda_multipel"]
 
-    elif kvidul:
-        # Kvidul som EIER av eget anlegg: banklån settes direkte (finansieringsplan
+    elif landanlegg:
+        # leverandøren som EIER av eget anlegg: banklån settes direkte (finansieringsplan
         # fase 1: lån 739 / EK 733 MNOK), resten som i Konsolidert-maskineriet.
-        with st.expander("Eier - Kvidul AS (eget anlegg) - finansiering, avskrivning, skatt", expanded=False):
+        with st.expander("Eier - Post-smolt-leverandør (eget anlegg) - finansiering, avskrivning, skatt", expanded=False):
             ux = dict(default_config.UTLEIER_DEFAULTS)
-            st.caption("Kvidul-deck s. 19: CAPEX fase 1 1 472 MNOK (nøytral kalkyle), finansiert med lån 739 og "
+            st.caption("leverandørens investeringsplan: CAPEX fase 1 1 472 MNOK (nøytral kalkyle), finansiert med lån 739 og "
                        "egenkapital 733 MNOK. CAPEX settes i '13. Anleggskostnader' over. Lånet er annuitet.")
             c1, c2, c3 = st.columns(3)
-            banklan_belop_preview = _nok_input("Banklån (NOK)", "kv_banklan", getattr(default_config, "BANKLAN_NOK", 0.0), container=c1)
+            banklan_belop_preview = _nok_input("Banklån (NOK)", "ps_banklan", getattr(default_config, "BANKLAN_NOK", 0.0), container=c1)
             swap_txt = c2.text_input("Swap-rente (%/år)", value=fmt_float(ux["swap_rente_pct"] * 100, 2), key="ux_swap")
             paslag_txt = c3.text_input("Kredittpåslag (%/år)", value=fmt_float(ux["kredittpaslag_pct"] * 100, 2), key="ux_paslag")
             swap_rente_pct = parse_number(swap_txt, ux["swap_rente_pct"] * 100) / 100.0
@@ -1323,14 +1319,14 @@ with st.sidebar:
         skattesats_txt = st.text_input("Skattesats (%)", value=fmt_float(_rd.get("skattesats_pct", 0.22) * 100, 1), key="res_skattesats")
         skattesats = parse_number(skattesats_txt, _rd.get("skattesats_pct", 0.22) * 100) / 100.0
 
-    if kvidul:
-        # Kvidul har karpooler per trinn (se "Leveranseplan og kapasitet" under) - ingen enkelttank.
+    if landanlegg:
+        # Landanlegget har karpooler per trinn (se "Leveranseplan og kapasitet" under) - ingen enkelttank.
         tank_volume_m3, max_density = float(default_config.TANK_VOLUME_M3), float(default_config.MAX_DENSITY_KG_M3)
         st.header("Tank")
-        st.caption("Kvidul: kar, volum og tetthetstak settes PER TRINN under 'Rotasjon' - ingen enkelttank her.")
+        st.caption("Landanlegg: kar, volum og tetthetstak settes PER TRINN under 'Rotasjon' - ingen enkelttank her.")
     else:
       st.header("Tank")
-    if not kvidul:
+    if not landanlegg:
       # Etiketten følger kakestykke-modus (valgt under Rotasjon): med skyveskott
       # er tallet et SNITTVOLUM per kakestykke (anleggets totale volum / antall),
       # ikke en fast tankstørrelse - veggene flyttes fritt.
@@ -1351,31 +1347,31 @@ with st.sidebar:
                      + (" (fordeles fritt mellom kakestykkene)" if not _skott_er_faste else " (låst per skott)"))
       max_density = st.number_input("Maks tetthet (kg/m³)", value=float(default_config.MAX_DENSITY_KG_M3), step=5.0)
 
-    st.header("Leveranseplan og kapasitet" if kvidul else "Rotasjon")
+    st.header("Leveranseplan og kapasitet" if landanlegg else "Rotasjon")
     multitank = (produkttype == "Slaktefisk")
-    if kvidul:
-        # ---- KVIDUL: kohorter plasseres BAKOVER fra ABD-innsettene (scheduler_kvidul.py) ----
+    if landanlegg:
+        # ---- LANDANLEGG: kohorter plasseres BAKOVER fra ABD-innsettene (scheduler_postsmolt.py) ----
         st.caption("Hver kohort leveres i uken NOS setter inn i Big Dipper (første mandag i jan/mar/mai/jul/sep/nov "
                    "for ABD 1, feb/apr/... for ABD 2) og settes inn ved 30 g det antall vekstuker FØR som trengs "
                    "for å nå leveringsvekten ved valgt RAS-temperatur. Kapasiteten sjekkes per trinn (karpool).")
         c_a, c_b = st.columns(2)
-        kv_n_abd = int(c_a.radio("Antall Big Dipper (ABD) å levere til", options=[1, 2], index=0, key="kv_n_abd", horizontal=True,
+        ps_n_abd = int(c_a.radio("Antall Big Dipper (ABD) å levere til", options=[1, 2], index=0, key="ps_n_abd", horizontal=True,
                                  help="1 ABD = 6 leveranser/år. 2 ABD = 12 leveranser/år (krever normalt fase 2-hallen)."))
-        kv_lev_start_ar = int(c_b.number_input("Første leveranseår (ABD-innsett)", min_value=2026, max_value=2040,
-                                               value=int(default_config.LEVERANSE_START_AR), step=1, key="kv_lev_start_ar"))
+        ps_lev_start_ar = int(c_b.number_input("Første leveranseår (ABD-innsett)", min_value=2026, max_value=2040,
+                                               value=int(default_config.LEVERANSE_START_AR), step=1, key="ps_lev_start_ar"))
         c_c, c_d = st.columns(2)
-        kv_levert_antall = int(_auto_format_number_input("Levert antall per leveranse (stk)", key="kv_levert_antall",
+        ps_levert_antall = int(_auto_format_number_input("Levert antall per leveranse (stk)", key="ps_levert_antall",
                                                          default_value=float(default_config.LEVERT_ANTALL_PER_LEVERANSE), container=c_c))
-        kv_levert_vekt_g = float(c_d.number_input("Leveringsvekt (g)", min_value=100.0, max_value=2000.0,
-                                                  value=float(default_config.LEVERT_VEKT_KG * 1000), step=10.0, key="kv_levert_vekt_g"))
-        kv_innsett_modus = st.radio("Innsettantall ved 30 g", options=["Automatisk (dekker dødeligheten)", "Fast antall"],
-                                    index=0, key="kv_innsett_modus", horizontal=True)
-        if kv_innsett_modus == "Fast antall":
-            kv_innsett_fast = int(_auto_format_number_input("Innsettantall (stk)", key="kv_innsett_fast",
+        ps_levert_vekt_g = float(c_d.number_input("Leveringsvekt (g)", min_value=100.0, max_value=2000.0,
+                                                  value=float(default_config.LEVERT_VEKT_KG * 1000), step=10.0, key="ps_levert_vekt_g"))
+        ps_innsett_modus = st.radio("Innsettantall ved 30 g", options=["Automatisk (dekker dødeligheten)", "Fast antall"],
+                                    index=0, key="ps_innsett_modus", horizontal=True)
+        if ps_innsett_modus == "Fast antall":
+            ps_innsett_fast = int(_auto_format_number_input("Innsettantall (stk)", key="ps_innsett_fast",
                                                             default_value=float(default_config.INNSETT_ANTALL_FAST)))
         else:
-            kv_innsett_fast = int(default_config.INNSETT_ANTALL_FAST)
-        st.markdown("**Trinn (karpooler) - Brennholmen fase 1** (Kvidul-deck s. 11)")
+            ps_innsett_fast = int(default_config.INNSETT_ANTALL_FAST)
+        st.markdown("**Trinn (karpooler) - fase 1** (leverandørens anleggsdata)")
         st.caption("Fisken tilhører trinnet etter vekt. m³-behov = stående biomasse / tetthetstak; karbehov rundes OPP per "
                    "kohort (et kar deles ikke mellom kohorter). Tetthetstak 50 kg/m³ er bekreftet for post-smolt; yngel/smolt er antakelser.")
         _trinn_def = pd.DataFrame([
@@ -1385,27 +1381,27 @@ with st.sidebar:
              "Til (g)": (float(t["vekt_til_g"]) if t["vekt_til_g"] is not None else None)}
             for t in default_config.TRINN
         ])
-        kv_trinn_edited = st.data_editor(_trinn_def, hide_index=True, use_container_width=True, key="kv_trinn_editor",
+        ps_trinn_edited = st.data_editor(_trinn_def, hide_index=True, use_container_width=True, key="ps_trinn_editor",
                                          disabled=["Trinn"], column_config={"Aktiv": st.column_config.CheckboxColumn()})
-        kv_fase2_overgang_g = int(st.number_input("Overgang til fase 2-hallen ved (g) - gjelder kun når fase 2 er aktiv",
+        ps_fase2_overgang_g = int(st.number_input("Overgang til fase 2-hallen ved (g) - gjelder kun når fase 2 er aktiv",
                                                   min_value=100, max_value=1500, value=int(default_config.FASE2_OVERGANG_G),
-                                                  step=50, key="kv_fase2_overgang_g"))
-        kv_trinn = []
-        for _i, _row in kv_trinn_edited.iterrows():
+                                                  step=50, key="ps_fase2_overgang_g"))
+        ps_trinn = []
+        for _i, _row in ps_trinn_edited.iterrows():
             _t = dict(default_config.TRINN[_i])
             _t.update({"aktiv": bool(_row["Aktiv"]), "antall_kar": int(_row["Antall kar"]), "kar_volum_m3": float(_row["Karvolum (m³)"]),
                        "tetthetstak_kg_m3": float(_row["Tetthetstak (kg/m³)"]),
                        "vekt_fra_g": (None if pd.isna(_row["Fra (g)"]) else float(_row["Fra (g)"])),
                        "vekt_til_g": (None if pd.isna(_row["Til (g)"]) else float(_row["Til (g)"]))})
-            kv_trinn.append(_t)
-        kv_fase2 = any(t["id"] == "fase2" and t["aktiv"] for t in kv_trinn)
-        if kv_n_abd == 2 and not kv_fase2:
+            ps_trinn.append(_t)
+        ps_fase2 = any(t["id"] == "fase2" and t["aktiv"] for t in ps_trinn)
+        if ps_n_abd == 2 and not ps_fase2:
             st.warning("2 ABD-er uten fase 2-hallen: post-smolt-hallen i fase 1 blir overbooket (ca. 39 kar mot 24). Aktiver fase 2 i tabellen.")
         st.caption(f"→ Kapasitet aktive trinn: " + ", ".join(f"{t['navn']}: {int(t['antall_kar'])} x {fmt_int(t['kar_volum_m3'])} m³"
-                                                            for t in kv_trinn if t["aktiv"]))
+                                                            for t in ps_trinn if t["aktiv"]))
         n_tanks, tank_stagger, tank_start_offsets, skott_faste = 1, 0, [0], False
         n_batches = 1
-        start_year, start_week = kv_lev_start_ar - 1, 1   # scheduleren setter faktisk uke 0 (= første innsett)
+        start_year, start_week = ps_lev_start_ar - 1, 1   # scheduleren setter faktisk uke 0 (= første innsett)
         oppskrift1_dato = monday_of_week(0, start_year, start_week)
     elif multitank:
         # ---- BIG DIPPER MULTI-TANK (Slaktefisk) ----
@@ -1528,15 +1524,15 @@ with st.sidebar:
     ekstra_venteuker = [0] * int(n_batches)
     oppskrift_resultat_placeholder = []  # fylles inn LENGER NED i skriptet, når leveringsvekt faktisk er kjent
     uke_offset = 0  # kumulativ vekst+vask+ekstra venteuker - brukes til å vise/sette NESTE oppskrifts startdato
-    if kvidul:
+    if landanlegg:
         # Oppskriften er gitt av leveranseplanen: 30 g inn, vekstuker og antall
-        # regnes ut av scheduler_kvidul. Listene fylles kun for kompatibilitet.
+        # regnes ut av scheduler_postsmolt. Listene fylles kun for kompatibilitet.
         start_weights_g = [float(default_config.START_WEIGHT_KG * 1000)]
-        smolt_counts = [int(kv_innsett_fast)]
+        smolt_counts = [int(ps_innsett_fast)]
         growth_weeks, cleaning_weeks = [25], [int(default_config.VASKEUKER_ETTER_LEVERING)]
         sales_window_weeks = [int(default_config.SALGSVINDU_UKER)]
         oppskrift_resultat_placeholder.append(st.empty())
-    for i in (range(int(n_batches)) if not kvidul else []):
+    for i in (range(int(n_batches)) if not landanlegg else []):
         if multitank:
             _t_uke, _t_dato = week_label(tank_start_offsets[i], start_year, start_week)
             st.markdown(f"**Tank {i + 1} - oppskrift** (første innsett {_t_uke}, {_t_dato.strftime('%d.%m.%Y')})")
@@ -1755,12 +1751,12 @@ with st.sidebar:
             )
             resource_factors[r["id"]] = r.get("faktor_per_kg_wfe", 1.0)
             price_txt = str(computed_biomasse_forsikring)
-        elif r["id"] == "energi" and kvidul:
+        elif r["id"] == "energi" and landanlegg:
             st.caption("Enhet: kWh - RAS-anleggets strømforbruk per kg WFE produsert (pumper, oksygenering, biofilter, temperering)")
             e1, e2 = st.columns(2)
             resource_factors[r["id"]] = e1.number_input("kWh per kg WFE", value=float(r.get("faktor_per_kg_wfe", 6.0)),
-                                                        step=0.5, format="%.1f", key="kv_energi_kwh_per_kg",
-                                                        help="ANTAKELSE 6 kWh/kg (typisk RAS 4-8). Kvidul-deck s. 16: 6 MWp for en 10 mill.-smoltmodul.")
+                                                        step=0.5, format="%.1f", key="ps_energi_kwh_per_kg",
+                                                        help="ANTAKELSE 6 kWh/kg (typisk RAS 4-8). leverandørens energinotat: 6 MWp for en 10 mill.-smoltmodul.")
             price_txt = e2.text_input("Pris (kr/kWh)", value=default_price_str, key=f"price_{r['id']}")
         elif r["id"] == "energi":
             # 2. MGO: energibehov (kWh/kg WFE) -> liter diesel via energiinnhold
@@ -1902,22 +1898,22 @@ cfg.N_TANKS = int(n_tanks)                 # Big Dipper multi-tank (Slaktefisk);
 cfg.TANK_STAGGER_WEEKS = int(tank_stagger)
 cfg.TANK_START_WEEK_OFFSETS = list(tank_start_offsets)   # globale ukeindekser for første innsett per tank
 cfg.SKOTT_FASTE = bool(skott_faste)   # True = faste kakestykker (tetthetstak per tank), False = skyveskott (anleggsnivå)
-cfg.KVIDUL = bool(kvidul)
-if kvidul:
-    # Leveranseplan og trinn-kapasitet - se scheduler_kvidul.py / config_kvidul.py
-    cfg.N_ABD = int(kv_n_abd)
+cfg.LANDANLEGG = bool(landanlegg)
+if landanlegg:
+    # Leveranseplan og trinn-kapasitet - se scheduler_postsmolt.py / config_postsmolt.py
+    cfg.N_ABD = int(ps_n_abd)
     cfg.ABD_INNSETT_MANEDER = dict(default_config.ABD_INNSETT_MANEDER)
-    cfg.LEVERANSE_START_AR = int(kv_lev_start_ar)
-    cfg.LEVERT_ANTALL_PER_LEVERANSE = int(kv_levert_antall)
-    cfg.LEVERT_VEKT_KG = float(kv_levert_vekt_g) / 1000.0
-    cfg.INNSETT_ANTALL_MODUS = "fast" if kv_innsett_modus == "Fast antall" else "auto"
-    cfg.INNSETT_ANTALL_FAST = int(kv_innsett_fast)
+    cfg.LEVERANSE_START_AR = int(ps_lev_start_ar)
+    cfg.LEVERT_ANTALL_PER_LEVERANSE = int(ps_levert_antall)
+    cfg.LEVERT_VEKT_KG = float(ps_levert_vekt_g) / 1000.0
+    cfg.INNSETT_ANTALL_MODUS = "fast" if ps_innsett_modus == "Fast antall" else "auto"
+    cfg.INNSETT_ANTALL_FAST = int(ps_innsett_fast)
     cfg.INNSETT_ANTALL_AVRUNDING = int(default_config.INNSETT_ANTALL_AVRUNDING)
     cfg.SALGSVINDU_UKER = int(default_config.SALGSVINDU_UKER)
     cfg.VASKEUKER_ETTER_LEVERING = int(default_config.VASKEUKER_ETTER_LEVERING)
     cfg.VEKSTUKER_AVRUNDING = getattr(default_config, "VEKSTUKER_AVRUNDING", "nærmest")
-    cfg.TRINN = kv_trinn
-    cfg.FASE2_OVERGANG_G = int(kv_fase2_overgang_g)
+    cfg.TRINN = ps_trinn
+    cfg.FASE2_OVERGANG_G = int(ps_fase2_overgang_g)
     cfg.KAR_DELES_IKKE_MELLOM_KOHORTER = bool(default_config.KAR_DELES_IKKE_MELLOM_KOHORTER)
 cfg.RESOURCES = [
     {**r, "faktor_per_kg_wfe": resource_factors[r["id"]]} if r["id"] in resource_factors else dict(r)
@@ -1954,10 +1950,10 @@ def _load_growth_tables():
 
 
 gt = _load_growth_tables()
-if kvidul:
-    # Kvidul: kohorter bakover fra ABD-innsettene, kapasitet per trinn - se
-    # scheduler_kvidul.py. Setter cfg.START_ISO_YEAR/WEEK (uke 0 = første innsett).
-    weekly_df, generations, cohorts, meta = build_kvidul_schedule(cfg, growth_tables=gt)
+if landanlegg:
+    # Landanlegg: kohorter bakover fra ABD-innsettene, kapasitet per trinn - se
+    # scheduler_postsmolt.py. Setter cfg.START_ISO_YEAR/WEEK (uke 0 = første innsett).
+    weekly_df, generations, cohorts, meta = build_postsmolt_schedule(cfg, growth_tables=gt)
 elif multitank:
     # N parallelle tanker (Big Dipper) - lag oppå den urørte 1-tank-motoren,
     # se scheduler_multitank.py. Med N_TANKS = 1 er dette identisk med
@@ -1967,8 +1963,8 @@ else:
     weekly_df, generations, cohorts, meta = build_1tank_schedule(cfg, growth_tables=gt)
 # Etikett for grupperingsdimensjonen info["batch"]: "Oppskrift N" i 1-tank-
 # rotasjon, "Tank N" når flere tanker kjører parallelt.
-n_tanker_aktiv = 1 if kvidul else int(meta.get("n_tanks", 1))   # Kvidul: ABD-ene er kunder, ikke tanker
-gruppe_navn = "ABD" if kvidul else ("Tank" if n_tanker_aktiv > 1 else "Oppskrift")
+n_tanker_aktiv = 1 if landanlegg else int(meta.get("n_tanks", 1))   # Landanlegg: ABD-ene er kunder, ikke tanker
+gruppe_navn = "ABD" if landanlegg else ("Tank" if n_tanker_aktiv > 1 else "Oppskrift")
 ledger = build_resource_ledger(cfg, cohorts, generations)
 by_cohort = summarize_by_cohort(ledger, cfg)
 by_month = summarize_by_month(ledger, cfg)
@@ -1982,7 +1978,7 @@ complete_gens = generations  # alle kohorter her er allerede fullt simulert
 # vises der oppe, siden det krever hele vekstsimuleringen (RGI, sesong,
 # temperaturprofil osv.), som ikke er kjørt før nå.
 _solgt_enhet_preview = "HOG" if cfg.PRODUKTTYPE == "Slaktefisk" else "WFE"
-if kvidul and oppskrift_resultat_placeholder:
+if landanlegg and oppskrift_resultat_placeholder:
     _k0 = next(iter(generations.values()))
     oppskrift_resultat_placeholder[0].caption(
         f"→ {meta['vekstuker']} vekstuker ved valgt temperatur: {fmt_int(_k0['stocked'])} stk inn ved "
@@ -2008,7 +2004,7 @@ for _i, _placeholder in enumerate(oppskrift_resultat_placeholder):
 # METRICS
 # ----------------------------------------------------------------------
 col1, col2, col3 = st.columns(3)
-if kvidul:
+if landanlegg:
     col1.metric("Big Dipper-enheter levert til", f"{meta['n_abd']}")
     col2.metric(f"Vekstuker {fmt_float(cfg.START_WEIGHT_KG*1000,0)} g → {fmt_float(cfg.LEVERT_VEKT_KG*1000,0)} g", f"{meta['vekstuker']} uker")
 elif n_tanker_aktiv > 1:
@@ -2043,8 +2039,8 @@ if n_tanker_aktiv > 1:
     _stabil_tot = m3_behov_total.iloc[52:int(cfg.N_YEARS_TO_RUN) * 52]
     _maks_m3, _maks_uke = float(_stabil_tot.max()), _stabil_tot.idxmax()
     _uker_over = int((m3_behov_total.iloc[:int(cfg.N_YEARS_TO_RUN) * 52] > meta["m3_pool"]).sum())
-if kvidul:
-    # ---- KVIDUL: kapasitet per trinn (karpool) ----
+if landanlegg:
+    # ---- LANDANLEGG: kapasitet per trinn (karpool) ----
     _ts = trinn_sammendrag(meta)
     _over_trinn = _ts[_ts["Uker over kapasitet"] > 0]
     if len(_over_trinn):
@@ -2158,10 +2154,10 @@ for yr in forste_tre_ar:
         snittvekt_g = snittvekt_wfe_g * cfg.HOG_FAKTOR
         tonn_levert_hog = tonn_levert * cfg.HOG_FAKTOR
         c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("1) Tonn inn", f"{fmt_float(tonn_inn, 1)} t")
-        c2.metric("2) Netto tilvekst", f"{fmt_float(netto_tilvekst, 1)} t")
-        c3.metric("3) Tonn levert (WFE)", f"{fmt_float(tonn_levert, 1)} t")
-        c4.metric("Tonn levert (HOG)", f"{fmt_float(tonn_levert_hog, 1)} t")
+        c1.metric("1) Tonn inn", f"{fmt_int(tonn_inn)} t")
+        c2.metric("2) Netto tilvekst", f"{fmt_int(netto_tilvekst)} t")
+        c3.metric("3) Tonn levert (WFE)", f"{fmt_int(tonn_levert)} t")
+        c4.metric("Tonn levert (HOG)", f"{fmt_int(tonn_levert_hog)} t")
         c5.metric("Snittvekt levert (WFE)", f"{fmt_float(snittvekt_wfe_g, 0)} g")
         c6.metric("Snittvekt levert (HOG)", f"{fmt_float(snittvekt_g, 0)} g")
         continue
@@ -2527,11 +2523,19 @@ if n_tanker_aktiv > 1:
     _pie_df = _pie_df[_pie_df["_dato"].dt.year.isin(_pie_ar)]
     _pie_df["_ar"], _pie_df["_mnd"] = _pie_df["_dato"].dt.year, _pie_df["_dato"].dt.month
     _pie_slutt = _pie_df.groupby(["_ar", "_mnd"]).last().drop(columns=["_dato"])
-    st.caption(
-        f"Kakestykkene måned for måned ({_pie_ar[0]}-{_pie_ar[-1]}): hver kohorts andel av anleggets "
-        f"{fmt_int(m3_pool)} m³ ved månedens slutt, hvit del = ledig kapasitet. Viser hvor mye veggene må "
-        "flyttes fra måned til måned."
-    )
+    if cfg.SKOTT_FASTE:
+        st.caption(
+            f"Kakestykkene måned for måned ({_pie_ar[0]}-{_pie_ar[-1]}): {n_tanker_aktiv} FASTE skott à "
+            f"{fmt_int(cfg.TANK_VOLUME_M3)} m³ (svarte streker). Farget del = kohortens m³-behov ved "
+            f"{fmt_int(max_density)} kg/m³ ved månedens slutt, hvit del = ubrukt volum i det skottet. Prosenten i "
+            "tittelen er samlet utnyttelse av anlegget."
+        )
+    else:
+        st.caption(
+            f"Kakestykkene måned for måned ({_pie_ar[0]}-{_pie_ar[-1]}): hver kohorts andel av anleggets "
+            f"{fmt_int(m3_pool)} m³ ved månedens slutt, hvit del = ledig kapasitet. Viser hvor mye veggene må "
+            "flyttes fra måned til måned."
+        )
     fig_pie, axes = plt.subplots(len(_pie_ar) * 2, 6, figsize=(20, 7.0 * len(_pie_ar)))
     axes = axes.flatten()
     _i = 0
@@ -2542,6 +2546,32 @@ if n_tanker_aktiv > 1:
                 ax.axis("off"); continue
             rad = _pie_slutt.loc[(_ar, m)]
             rad = rad[rad > 0]
+            if cfg.SKOTT_FASTE:
+                # FASTE SKOTT: kaken deles i N like, låste stykker (tank 1 kl. 12,
+                # med klokka). Innenfor hvert stykke: farget = kohortens m³-behov,
+                # hvitt = ubrukt volum i skottet. Svart ring markerer skottene.
+                _V = float(cfg.TANK_VOLUME_M3)
+                _per_tank = {}
+                for _c, _v in rad.items():
+                    try:
+                        _t = int(str(_c).split("-K")[1])
+                    except (IndexError, ValueError):
+                        continue
+                    _per_tank[_t] = (_c, min(float(_v), _V))
+                _vals, _cols, _labs, _brukt = [], [], [], 0.0
+                for _t in range(1, n_tanker_aktiv + 1):
+                    _c, _m3 = _per_tank.get(_t, (None, 0.0))
+                    _brukt += _m3
+                    _vals += [_m3, _V - _m3]
+                    _cols += [_tankfarge(f"G0-K{_t}"), "white"]
+                    _labs += [f"{_c}\n{_m3 / 1000:.0f}k" if _m3 > 0 else "",
+                              f"ledig\n{(_V - _m3) / 1000:.0f}k" if (_V - _m3) > 0.02 * _V else ""]
+                ax.pie(_vals, labels=_labs, colors=_cols, startangle=90, counterclock=False,
+                       wedgeprops={"edgecolor": "#999", "linewidth": 0.4}, textprops={"fontsize": 6})
+                ax.pie([_V] * n_tanker_aktiv, colors=["none"] * n_tanker_aktiv, startangle=90, counterclock=False,
+                       wedgeprops={"edgecolor": "#222", "linewidth": 1.4, "fill": False})
+                ax.set_title(f"{_mnd_navn[m - 1]} {_ar} - {_brukt / m3_pool * 100:.0f} % brukt", fontsize=8)
+                continue
             # FAST plass i kaken: alltid K1 først (kl. 12, med klokka), så K2,
             # K3 ... K6, deretter "Ledig" - uansett hvilken generasjon som
             # står i tanken. Da ligger hver tank på samme sted hver måned.
@@ -2643,14 +2673,14 @@ with st.expander("📊 Ressursregnskap (klikk for å vise/skjule)", expanded=Fal
         year_options = sorted(pd.to_datetime(ledger["dato"]).dt.isocalendar().year.unique())
         yr_pick = st.selectbox("Vis uker i år:", options=["Alle år"] + list(year_options), key="ledger_year")
         show = ledger if yr_pick == "Alle år" else ledger[pd.to_datetime(ledger["dato"]).dt.isocalendar().year == yr_pick]
-        if n_tanker_aktiv > 1 or kvidul:
+        if n_tanker_aktiv > 1 or landanlegg:
             # Flere tanker deler samme uke -> én rad per (tank, uke). Velg
             # én tank (radene vises som før), eller hele anlegget summert
             # per uke (mengder/kr/biomasse/antall summeres; vekt = vektet
             # snitt over tankene; ID-felt viser hvilke kohorter som var inne).
             _tank_valg = st.selectbox(
                 "Vis ukentlig for:", options=["Hele anlegget (sum per uke)"]
-                + ([f"ABD {t}" for t in range(1, int(meta.get("n_abd", 1)) + 1)] if kvidul
+                + ([f"ABD {t}" for t in range(1, int(meta.get("n_abd", 1)) + 1)] if landanlegg
                    else [f"Tank {t}" for t in range(1, n_tanker_aktiv + 1)]),
                 key="ledger_tank",
             )
