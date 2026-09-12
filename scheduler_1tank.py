@@ -113,6 +113,8 @@ def _split_i_batcher(c: "Cohort", info: dict, salgsvindu_uker: int) -> list[dict
         overlevelse.append(c.weekly_count_alive[i] / forrige if forrige > 0 else 1.0)
 
     batcher = []
+    _ubeskattet_bio = list(c.weekly_biomass_kg)          # kopi av den ubeskattede kurven før justering
+    kohort_start_vekt = float(info.get("start_weight_kg", c.weekly_biomass_kg[0] / max(c.weekly_count_alive[0], 1)))
     bestand = c.weekly_count_alive[start_idx - 1] if start_idx > 0 else float(info["stocked"])
     for j in range(n):
         i = start_idx + j
@@ -133,6 +135,23 @@ def _split_i_batcher(c: "Cohort", info: dict, salgsvindu_uker: int) -> list[dict
             "delivered_count": solgt_antall, "delivered_biomass_kg": solgt_biomasse_kg,
             "avg_weight_kg": vekt_kg,
         })
+        # ---- Vekst og fôr STOPPER for solgte batcher (rettet 12.09.2026) ----
+        # Den ubeskattede kurven regner vekst/fôr på HELE kohorten også etter
+        # at batcher er solgt. Skaler ukens bruttovekst, fôr og biomasse-
+        # tilvekst med andelen fisk som faktisk sto i tanken denne uken
+        # (bestand før salg / ubeskattet bestand). Batchen som selges i uke i
+        # vokser fram til salget og leveres på uke i sin vekt.
+        _tilstede = ((bestand + solgt_antall) / c.weekly_count_alive[i]) if c.weekly_count_alive[i] > 0 else 0.0
+        _tilstede = max(0.0, min(1.0, _tilstede))
+        c.weekly_gross_growth_kg[i] *= _tilstede
+        c.weekly_feed_kg[i] *= _tilstede
+        _diff_ubeskattet = _ubeskattet_bio[i] - (_ubeskattet_bio[i - 1] if i > 0 else info["stocked"] * kohort_start_vekt)
+        c.weekly_biomass_kg[i] = (c.weekly_biomass_kg[i - 1] if i > 0 else info["stocked"] * kohort_start_vekt) + _diff_ubeskattet * _tilstede
+    # Totaler for kohorten regnes på nytt etter justeringen
+    info["total_feed_kg"] = float(sum(c.weekly_feed_kg))
+    info["total_gross_growth_kg"] = float(sum(c.weekly_gross_growth_kg))
+    # biologisk FCR som før: fôr / bruttovekst (begge nå kun for fisk i tanken)
+    info["overall_fcr"] = (info["total_feed_kg"] / info["total_gross_growth_kg"]) if info["total_gross_growth_kg"] > 0 else 0.0
     return batcher
 
 

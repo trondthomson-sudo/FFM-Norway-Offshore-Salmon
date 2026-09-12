@@ -10,6 +10,8 @@ Run:  python -m streamlit run streamlit_app_1tank.py
 """
 import io
 import re
+import sys
+import os
 import calendar
 from datetime import date, timedelta
 
@@ -25,10 +27,12 @@ from growth_tables import GrowthTables
 from scheduler_1tank import build_1tank_schedule, week_label, monday_of_week
 from scheduler_multitank import build_multitank_schedule
 from scheduler_postsmolt import build_postsmolt_schedule, trinn_sammendrag
+from tankplan_postsmolt import tildel_kar, kohortplan_tabell, tegn_tankbruk, tegn_anlegg_maanedlig, tegn_anleggskart
 
 # Postsmolt-visningen er midlertidig skjult for investorpresentasjoner
 # (bekreftet av bruker). All kode beholdes - sett True for å vise den igjen.
-LANDANLEGG_VALG = "Post-smolt landanlegg"   # tredje visning: post-smolt-leverandørens eget landanlegg (se config_postsmolt.py)
+LANDANLEGG_VALG = "Post-smolt landanlegg"
+OPPSUMMERING_VALG = "Oppsummering (1 ABD)"   # fjerde visning: samlet figur EV / CAPEX / NPV / EK-verdi for alle selskaper, regnet i bakgrunnen   # tredje visning: post-smolt-leverandørens eget landanlegg (se config_postsmolt.py)
 from resource_ledger import (
     build_resource_ledger, summarize_by_cohort, summarize_by_month, summarize_by_year,
     build_monthly_overview, build_cashflow_ledger, summarize_cashflow_by_period, build_per_kg,
@@ -666,7 +670,9 @@ def _render_expandable_kontantstrom(wide_df: pd.DataFrame, highlight_groups: lis
     # fort forbi det opprinnelige (kollapsede) radantallet, og en for lav
     # boks tvinger frem mye intern scrolling. Fortsatt et TAK (ikke
     # ubegrenset) - resterende innhold scroller internt i boksen uansett.
-    box_maks_hoyde_px = min(1100, max(550, 50 + 34 * len(wide_df.index)))
+    # Boksen holdes innenfor en skjermhøyde (maks 800 px): da ruller man INNI boksen, og
+    # årsraden (sticky) henger fast øverst. Er tabellen kortere, krympes boksen til innholdet.
+    box_maks_hoyde_px = min(800, max(300, 70 + 26 * len(wide_df.index)))
     full_html = f"""
     {scroll_toolbar}
     <div id="kons-scroll-box" style="font-family: 'Source Sans Pro', -apple-system, sans-serif; font-size: 14px;
@@ -680,44 +686,280 @@ def _render_expandable_kontantstrom(wide_df: pd.DataFrame, highlight_groups: lis
 
 
 st.set_page_config(page_title="Norway Offshore Salmon", layout="wide")
-st.title("Post-smolt landanlegg - leveranse til Big Dipper" if st.session_state.get("produkttype_valg") == LANDANLEGG_VALG
-         else "Norway Offshore Salmon" + (" - Konsolidert (Aqualoop + NOS)" if st.session_state.get("produkttype_valg") == "Konsolidert" else ""))
-st.caption(
-    "Post-smolt landanlegg, fase 1: 30 g yngel -> 750 g post-smolt i tre karpooler (yngel/smolt/post-smolt), "
-    "levert til NOS sine Big Dipper-innsett. Ressursregnskap, kontantstrøm, resultat, balanse og kapitalbehov "
-    "for landanlegget som eier av eget anlegg." if st.session_state.get("produkttype_valg") == LANDANLEGG_VALG else
-    "Integrert produksjons- og finansmodell for Aqualoop Big Dipper: seks parallelle kohorter, "
-    "batchvis utslakting, ressursregnskap 0-16, kontantstrøm, resultat, balanse og kapitalbehov for "
-    "oppdretter (NOS) - og egne regnskaper, TC og IRR for SFaaS-aktøren (Aqualoop)."
-)
+if st.session_state.get("produkttype_valg", OPPSUMMERING_VALG) != OPPSUMMERING_VALG:
+    st.title("Post-smolt landanlegg - leveranse til Big Dipper" if st.session_state.get("produkttype_valg") == LANDANLEGG_VALG
+             else "Norway Offshore Salmon" + (" - Konsolidert (Aqualoop + NOS)" if st.session_state.get("produkttype_valg") == "Konsolidert" else ""))
+    st.caption(
+        "Post-smolt landanlegg, fase 1: 30 g yngel -> 750 g post-smolt i tre karpooler (yngel/smolt/post-smolt), "
+        "levert til NOS sine Big Dipper-innsett. Ressursregnskap, kontantstrøm, resultat, balanse og kapitalbehov "
+        "for landanlegget som eier av eget anlegg." if st.session_state.get("produkttype_valg") == LANDANLEGG_VALG else
+        "Integrert produksjons- og finansmodell for Aqualoop Big Dipper: seks parallelle kohorter, "
+        "batchvis utslakting, ressursregnskap 0-16, kontantstrøm, resultat, balanse og kapitalbehov for "
+        "oppdretter (NOS) - og egne regnskaper, TC og IRR for SFaaS-aktøren (Aqualoop)."
+    )
 
-# ---- BRUKERVEILEDNING (PDF) - ligger i repoet under docs/ og følger med
-#      Streamlit-linken. Nedlastingsknapp + innebygd visning. ----
-import os as _os
-_app_dir = _os.path.dirname(_os.path.abspath(__file__)) if "__file__" in globals() else _os.getcwd()
-_manual_path = _os.path.join(_app_dir, "docs", "Big_Dipper_FPA_Brukermanual.pdf")
-if _os.path.exists(_manual_path):
-    with open(_manual_path, "rb") as _f:
-        _manual_bytes = _f.read()
-    _c_m1, _c_m2 = st.columns([1, 5])
-    _c_m1.download_button("📄 Last ned brukerveiledning (PDF)", data=_manual_bytes,
-                          file_name="Big_Dipper_FPA_Brukermanual.pdf", mime="application/pdf",
-                          key="manual_download")
-    with st.expander("Vis brukerveiledningen her (metodedokument for modellen)", expanded=False):
-        # PDF-en vises som sidebilder (docs/manual_pages/side-NN.png) - Chrome
-        # og flere andre nettlesere blokkerer innebygde PDF-er via data-URL.
-        # Bildene lages fra PDF-en med: pdftoppm -png -r 110 <pdf> docs/manual_pages/side
-        _pages_dir = _os.path.join(_os.path.dirname(_manual_path), "manual_pages")
-        _pages = sorted(_os.path.join(_pages_dir, f) for f in _os.listdir(_pages_dir)) if _os.path.isdir(_pages_dir) else []
-        if _pages:
-            for _pg in _pages:
-                st.image(_pg, use_container_width=True)
-        else:
-            st.caption("Sidebildene (docs/manual_pages/) mangler - bruk nedlastingsknappen over.")
+    # ---- BRUKERVEILEDNING (PDF) - ligger i repoet under docs/ og følger med
+    #      Streamlit-linken. Nedlastingsknapp + innebygd visning. ----
+    import os as _os
+    _app_dir = _os.path.dirname(_os.path.abspath(__file__)) if "__file__" in globals() else _os.getcwd()
+    _manual_path = _os.path.join(_app_dir, "docs", "Big_Dipper_FPA_Brukermanual.pdf")
+    if _os.path.exists(_manual_path):
+        with open(_manual_path, "rb") as _f:
+            _manual_bytes = _f.read()
+        _c_m1, _c_m2 = st.columns([1, 5])
+        _c_m1.download_button("📄 Last ned brukerveiledning (PDF)", data=_manual_bytes,
+                              file_name="Big_Dipper_FPA_Brukermanual.pdf", mime="application/pdf",
+                              key="manual_download")
+        with st.expander("Vis brukerveiledningen her (metodedokument for modellen)", expanded=False):
+            # PDF-en vises som sidebilder (docs/manual_pages/side-NN.png) - Chrome
+            # og flere andre nettlesere blokkerer innebygde PDF-er via data-URL.
+            # Bildene lages fra PDF-en med: pdftoppm -png -r 110 <pdf> docs/manual_pages/side
+            _pages_dir = _os.path.join(_os.path.dirname(_manual_path), "manual_pages")
+            _pages = sorted(_os.path.join(_pages_dir, f) for f in _os.listdir(_pages_dir)) if _os.path.isdir(_pages_dir) else []
+            if _pages:
+                for _pg in _pages:
+                    st.image(_pg, use_container_width=True)
+            else:
+                st.caption("Sidebildene (docs/manual_pages/) mangler - bruk nedlastingsknappen over.")
 
 # ----------------------------------------------------------------------
 # SIDEPANEL
 # ----------------------------------------------------------------------
+# ============================================================================
+# OPPSUMMERING (1 ABD): kjører de tre andre visningene i bakgrunnen (ffm_headless.py)
+# med låste forutsetninger og tegner én figur: EV, CAPEX og netto nåverdi per
+# selskap, i SFaaS-struktur og fullt konsolidert. Post-smolt fra eget anlegg
+# (Fase I.A) til 100 kr/kg (config). Resultatene mellomlagres (st.cache_data).
+# ============================================================================
+def _render_oppsummering():
+    import subprocess, json as _json, hashlib as _hashlib
+    from matplotlib.patches import Patch as _Patch
+
+    @st.cache_data(show_spinner=False, persist="disk")   # varig på disk: ventetiden kommer bare én gang per kode-/forutsetningsendring
+    def _kjor_headless(spec_json: str, _fingerprint: str) -> dict:
+        _r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffm_headless.py"), spec_json],
+                            capture_output=True, text=True, timeout=900)
+        if _r.returncode != 0:
+            raise RuntimeError(_r.stderr[-3000:])
+        return _json.loads(_r.stdout.strip().splitlines()[-1])
+
+    _designs_op = list(getattr(postsmolt_config, "ANLEGG_DESIGN", {}).keys())
+    _d_ia = next((k for k in _designs_op if "I.A" in k), _designs_op[0] if _designs_op else "")
+    _d_ib = next((k for k in _designs_op if "I.B" in k), _d_ia)
+    with st.sidebar:
+        st.header("Oppsummering - forutsetninger")
+        st.markdown("**Venstre: én ABD**")
+        _pris1 = st.number_input("Post-smolt fra eget anlegg, 1 ABD (kr/kg WFE)", min_value=0.0,
+                                 value=float(getattr(postsmolt_config, "POSTSMOLT_SALGSPRIS_KR_PER_KG", 100.0)), step=1.0, format="%.0f", key="op_pris1")
+        _des1 = st.selectbox("Post-smoltanlegg, 1 ABD", options=_designs_op, index=_designs_op.index(_d_ia) if _d_ia in _designs_op else 0, key="op_design1")
+        st.markdown("**Høyre: to ABD-er**")
+        _pris2 = st.number_input("Post-smolt fra eget anlegg, 2 ABD (kr/kg WFE)", min_value=0.0, value=85.0, step=1.0, format="%.0f", key="op_pris2")
+        _des2 = st.selectbox("Post-smoltanlegg, 2 ABD", options=_designs_op, index=_designs_op.index(_d_ib) if _d_ib in _designs_op else 0, key="op_design2")
+        _nos_mult = st.number_input("NOS oppdretter (leier): EV som x EBITDA år 2", min_value=1.0, max_value=20.0, value=8.0, step=0.5, format="%.1f", key="op_nos_mult",
+                                    help="Oppdretter uten CAPEX verdsettes til multippel av første fulle års EBITDA (bekreftet 12.09.2026: 8x) i stedet for DCF.")
+        st.caption("Rigg: DCF med standardverdier i SFaaS (8 % / 10x); landanlegg 7 % / 12x; oppdretter x EBITDA. To ABD-er = to identiske rigger og "
+                   "oppdrettsselskap (tallene fra én rigg doblet) og ett post-smoltanlegg som leverer til begge. Første kjøring tar 2-3 minutter; deretter mellomlagret.")
+    _her = os.path.dirname(os.path.abspath(__file__))
+    _fp_bytes = b""
+    for _f in ("ffm_big_dipper.py", "config_1tank.py", "config_postsmolt.py", "resource_ledger.py", "ffm_headless.py",
+               "scheduler_1tank.py", "scheduler_multitank.py", "scheduler_postsmolt.py", "simulator.py", "growth_tables.py", "temperature.py"):
+        _pf = os.path.join(_her, _f)
+        if os.path.exists(_pf):
+            with open(_pf, "rb") as _fh:
+                _fp_bytes += _fh.read()
+    _fp = _hashlib.md5(_fp_bytes).hexdigest()
+    _M = 1e6
+
+    def _specs(pris, design):
+        _sess = {"smolt_pris_modus": "Eget post-smolt-anlegg (kr/kg WFE)", "smolt_eget_pris_kr_kg": float(pris)}
+        return [_json.dumps({"view": "SFaaS oppdrett", "session": _sess}),
+                _json.dumps({"view": LANDANLEGG_VALG, "design": design, "salgspris": float(pris)})]
+
+    def _hent_alle(spec_liste):
+        """Kjør alle spesifikasjoner parallelt (én underprosess hver); cachede
+        resultater hentes uten kjøring."""
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(6, max(1, (os.cpu_count() or 2)))) as _ex:
+            return list(_ex.map(lambda s: _kjor_headless(s, _fp), spec_liste))
+
+    def _entiteter(_s, _p, n):
+        f = float(n)
+        u, o, p = _s["utleier"], _s["operator"], _p["operator"]
+        rigg = "rigg" if n == 1 else f"{n} rigger"
+        nos_ev = f * o["ebitda_y2"] * float(_nos_mult)
+        return [
+            # navn, capex, innskutt EK / kapitalbehov, ebitda y2, pv_fcff, pv_tv, r, mult, farge, scenario, banklån
+            (f"Aqualoop - {rigg} (utleier)", f * u["capex"], f * (u["capex"] - u["lan"]), f * u["ebitda_y2"], f * u["pv_fcff"], f * u["pv_tv"], u["r"], u["mult"], "#6b7f95", 1, f * u["lan"]),
+            (f"NOS - oppdretter{'' if n == 1 else ' x' + str(n)} (leier)", 0.0, f * o["ek_oper"], f * o["ebitda_y2"], 0.0, nos_ev, None, float(_nos_mult), "#2f5d8a", 1, 0.0),
+            ("Post-smoltanlegg (eget)", p["capex"], p["ek_invest"] + p["ek_oper"], p["ebitda_y2"], p["pv_fcff"], p["pv_tv"], p["r"], p["mult"], "#c0522b", 1, p["lan"]),
+        ]
+
+    def _grunnlag(e):
+        return e[1] if e[1] > 0 else e[2]
+
+    def _sum(ent, sc, navn):
+        es = [e for e in ent if e[9] == sc]
+        return (navn, sum(e[1] for e in es), sum(e[2] for e in es), sum(e[3] for e in es), sum(e[4] for e in es), sum(e[5] for e in es), None, None, "#333333", sc, sum(e[10] for e in es))
+
+    def _tegn(ent, tittel, waterfall=False, ymax_felles=None):
+        """Balanseoppstilling per selskap: venstre søyle = EV, høyre søyle = CAPEX
+        (eller egenkapitalbehov for leietaker) med verdiskaping (EV - CAPEX) oppå.
+        Begge søylene er like høye når verdiskapingen er positiv; negativ
+        verdiskaping vises som rødt felt under CAPEX-toppen."""
+        _sum1 = _sum(ent, 1, "Konsolidert - alle tre samlet")
+        _venstre = [e for e in ent if e[9] == 1]
+        _sep = ("", 0, 0, 0, 0, 0, None, None, "white", 0, 0.0)
+        if waterfall:
+            # høyre side: fossefall av verdiskaping per selskap + sum (plassholdere i 'alle' for aksene)
+            alle = _venstre + [_sep] + [("__wf__" + e[0], 0, 0, 0, 0, 0, None, None, e[8], 3, 0.0) for e in _venstre] + [("__wf__Sum verdiskaping", 0, 0, 0, 0, 0, None, None, "#333333", 3, 0.0)]
+        else:
+            alle = _venstre + [_sep] + [_sum1]
+        fig, ax = plt.subplots(figsize=(15 if not waterfall else 17, 8.5))
+        w = 0.38
+        _wf_cum = 0.0
+        for i, e in enumerate(alle):
+            if not e[0]:
+                continue
+            if e[0].startswith("__wf__"):
+                _navn = e[0][6:]
+                if _navn.startswith("Sum"):
+                    ax.bar(i, _wf_cum, 0.6, color="#3d7a3d", alpha=0.85, edgecolor="#333", lw=0.6)
+                    ax.text(i, _wf_cum + 60, f"{fmt_int(_wf_cum)}", ha="center", va="bottom", fontsize=11, fontweight="bold")
+                    ax.text(i, _wf_cum / 2, "Sum\nverdi", ha="center", va="center", fontsize=10, color="white", fontweight="bold")
+                else:
+                    _src = next(x for x in _venstre if x[0] == _navn)
+                    _v = ((_src[4] + _src[5]) - _src[1]) / _M
+                    ax.bar(i, _v, 0.6, bottom=_wf_cum, color="#3d7a3d" if _v >= 0 else "#c0392b", alpha=0.85, edgecolor="#333", lw=0.6)
+                    ax.text(i, _wf_cum + _v / 2, "Verdi", ha="center", va="center", fontsize=10, color="white", fontweight="bold")
+                    ax.text(i, _wf_cum + _v + 60, f"+{fmt_int(_v)}" if _v >= 0 else fmt_int(_v), ha="center", va="bottom", fontsize=11, fontweight="bold",
+                            color="#3d7a3d" if _v >= 0 else "#a33a3a")
+                    if i + 1 < len(alle):
+                        ax.plot([i + 0.3, i + 0.7], [_wf_cum + _v, _wf_cum + _v], color="#777", lw=0.8, ls=":")
+                    _wf_cum += _v
+                continue
+            ev = (e[4] + e[5]) / _M; capex = e[1] / _M
+            # Samme prinsipp som fossefallene i de tre visningene: netto nåverdi = EV - CAPEX.
+            # Leietaker (NOS under SFaaS) har verken CAPEX eller gjeld -> netto = brutto.
+            grunnlag = capex
+            verdi = ev - grunnlag
+            # venstre: EV
+            ax.bar(i - w / 2, ev, w, color="#2f5d8a", alpha=0.9, edgecolor="#333", lw=0.6)   # samme blå på alle EV-søyler
+            ax.text(i - w / 2, ev + ev * 0.015 + 40, f"EV {fmt_int(ev)}", ha="center", va="bottom", fontsize=11, fontweight="bold")
+            # høyre: CAPEX + verdiskaping oppå
+            if capex > 0:
+                ax.bar(i + w / 2, grunnlag, w, color="#c8c8c8", edgecolor="#555", lw=0.6)
+            _ymax_all = max((x[4] + x[5]) / _M for x in alle if x[0])
+            _liten = abs(verdi) < 0.09 * _ymax_all
+            if verdi >= 0:
+                ax.bar(i + w / 2, verdi, w, bottom=grunnlag, color="#3d7a3d", alpha=0.85, edgecolor="#333", lw=0.6)
+                if _liten:
+                    ax.text(i + w / 2, grunnlag + verdi + 40, f"Verdi +{fmt_int(verdi)}", ha="center", va="bottom", fontsize=9.5, color="#3d7a3d", fontweight="bold")
+                else:
+                    ax.text(i + w / 2, grunnlag + verdi / 2, f"Verdi\n+{fmt_int(verdi)}", ha="center", va="center", fontsize=10.5, color="white", fontweight="bold")
+            else:
+                ax.bar(i + w / 2, -verdi, w, bottom=ev, color="#c0392b", alpha=0.75, edgecolor="#333", lw=0.6)
+                if _liten:
+                    ax.text(i + w / 2, grunnlag + 40, f"Verdi {fmt_int(verdi)}", ha="center", va="bottom", fontsize=9.5, color="#a33a3a", fontweight="bold")
+                else:
+                    ax.text(i + w / 2, ev - verdi / 2, f"Verdi\n{fmt_int(verdi)}", ha="center", va="center", fontsize=10.5, color="white", fontweight="bold")
+            if capex > 0:
+                ax.text(i + w / 2, grunnlag / 2, "CAPEX\n" + fmt_int(grunnlag), ha="center", va="center", fontsize=10.5, color="#222")
+            else:
+                ax.text(i + w / 2, -_ymax_all * 0.012, "ingen CAPEX (leier)", ha="center", va="top", fontsize=8.5, color="#666")
+            ax.text(i, -_ymax_all * 0.05,
+                    (f"EV/CAPEX {ev / grunnlag:.2f}x\n" if grunnlag else "") + f"EV/EBITDA {ev / (e[3] / _M):.1f}x" + (f"\n{e[6] * 100:.0f} % / {e[7]:.0f}x" if e[6] else (f"\n{e[7]:.0f}x EBITDA år 2" if e[7] else "")),
+                    ha="center", va="top", fontsize=10, color="#3d7a3d" if verdi >= 0 else "#a33a3a")
+        ax.axhline(0, color="#999", lw=0.8)
+        ax.set_xticks(range(len(alle))); ax.set_xticklabels([e[0].replace("__wf__", "").replace(" - ", "\n") for e in alle], fontsize=11)
+        ax.set_ylabel("MNOK", fontsize=11); ax.tick_params(axis="y", labelsize=10); ax.spines[["top", "right"]].set_visible(False)
+        ymax = max((e[4] + e[5]) / _M for e in alle if e[0])
+        if ymax_felles:
+            ymax = max(ymax, ymax_felles)   # felles skala på tvers av figurer, slik at størrelsene kan sammenlignes direkte
+        ax.set_ylim(-ymax * 0.24, ymax * 1.2)
+        ax.set_yticks([t for t in ax.get_yticks() if t >= 0])
+        _mid = alle.index(_sep)
+        ax.axvline(_mid, color="#bbb", lw=1, ls="--")
+        ax.text(_mid / 2, ymax * 1.17, "SFaaS-struktur", ha="center", fontsize=12, fontweight="bold", color="#444")
+        ax.text(_mid + (len(alle) - 1 - _mid) / 2, ymax * 1.17, "Verdiskaping - fossefall til samlet verdi" if waterfall else "Konsolidert = summen av de tre",
+                ha="center", fontsize=12, fontweight="bold", color="#444")
+        ax.legend(handles=[_Patch(fc="#2f5d8a", ec="#333", label="Enterprise value"), _Patch(fc="#c8c8c8", ec="#555", label="CAPEX"),
+                           _Patch(fc="#3d7a3d", alpha=0.85, label="Verdiskaping = EV - CAPEX (leietaker: = EV)"), _Patch(fc="#c0392b", alpha=0.75, label="Negativ verdiskaping")],
+                  loc="upper left", fontsize=10, frameon=False)
+        ax.set_title(tittel, loc="left", fontsize=13, fontweight="bold")
+        fig.tight_layout()
+        rows = []
+        for e in (alle if not waterfall else _venstre + [_sum1]):
+            if not e[0] or e[0].startswith("__wf__"):
+                continue
+            ev = e[4] + e[5]; grunnlag = e[1]
+            rows.append({"Selskap": e[0], "CAPEX": fmt_int(e[1] / _M) if e[1] else "- (leier)",
+                         "EBITDA år 2": fmt_int(e[3] / _M), "EV (DCF)": fmt_int(ev / _M), "Verdiskaping (EV - CAPEX)": fmt_int((ev - grunnlag) / _M),
+                         "EV/CAPEX": f"{ev / grunnlag:.2f}x" if grunnlag else "-", "EV/EBITDA år 2": f"{ev / e[3]:.1f}x" if e[3] else "-",
+                         "Sluttverdi-andel": f"{e[5] / ev * 100:.0f} %" if e[6] else "-", "Verdsetting": f"DCF {e[6] * 100:.0f} % / exit {e[7]:.0f}x" if e[6] else (f"{e[7]:.0f}x EBITDA år 2" if e[7] else "sum")})
+        return fig, pd.DataFrame(rows)
+
+    st.title("Oppsummering - enterprise value mot CAPEX per selskap")
+    st.caption("Venstre søyle: enterprise value (nåverdi av fri kontantstrøm til totalkapitalen etter skatt + sluttverdi). Høyre søyle: CAPEX "
+               "med verdiskapingen (EV - CAPEX) lagt oppå - som en balanse. Samme tall og prinsipp som fossefallene nederst i de tre visningene; "
+               "NOS som leietaker har verken CAPEX eller gjeld, så der er verdiskapingen lik EV.")
+    with st.spinner("Regner de fire modellkjøringene parallelt (ca. ett minutt første gang) ..."):
+        _res = _hent_alle(_specs(_pris1, _des1) + _specs(_pris2, _des2))   # fire kjøringer
+    _s1, _p1, _s2, _p2 = _res
+    # ---- Overskrift: produksjon i tonn ----
+    def _tonn(_s, _p, n):
+        return n * _s["operator"]["kg_solgt_y2"] / 1000.0, _p["operator"]["kg_solgt_y2"] / 1000.0
+    _hog1, _ps1 = _tonn(_s1, _p1, 1); _hog2, _ps2 = _tonn(_s2, _p2, 2)
+    _m1, _m2, _m3, _m4 = st.columns(4)
+    _m1.metric("Én ABD - laks levert (t HOG/år)", fmt_int(_hog1), help="Første fulle driftsår for riggen (år 2).")
+    _m2.metric("Én ABD - post-smolt levert (t WFE/år)", fmt_int(_ps1), help="Fra post-smoltanlegget, første fulle driftsår.")
+    _m3.metric("To ABD-er - laks levert (t HOG/år)", fmt_int(_hog2))
+    _m4.metric("To ABD-er - post-smolt levert (t WFE/år)", fmt_int(_ps2))
+    _ent1_, _ent2_ = _entiteter(_s1, _p1, 1), _entiteter(_s2, _p2, 2)
+    _ymax_felles = max(((e[4] + e[5]) / _M) for e in (_ent1_ + _ent2_ + [_sum(_ent1_, 1, "s"), _sum(_ent2_, 1, "s")]))
+    _c1, _c2 = st.columns(2)
+    with _c1:
+        st.subheader(f"Én Big Dipper - {fmt_int(_hog1)} t HOG/år - post-smolt {_pris1:.0f} kr/kg ({_des1.split(' –')[0]})")
+        _fig1, _tab1 = _tegn(_ent1_, f"Én ABD: {fmt_int(_hog1)} t HOG laks per år, {fmt_int(_ps1)} t post-smolt til {_pris1:.0f} kr/kg.", ymax_felles=_ymax_felles)
+        st.pyplot(_fig1, use_container_width=True); plt.close(_fig1)
+    with _c2:
+        st.subheader(f"To Big Dippere - {fmt_int(_hog2)} t HOG/år - post-smolt {_pris2:.0f} kr/kg ({_des2.split(' –')[0]})")
+        _fig2, _tab2 = _tegn(_ent2_, f"To ABD-er: {fmt_int(_hog2)} t HOG laks per år, {fmt_int(_ps2)} t post-smolt til {_pris2:.0f} kr/kg.", ymax_felles=_ymax_felles)
+        st.pyplot(_fig2, use_container_width=True); plt.close(_fig2)
+    # ---- Seks ABD-er = 3 x (to ABD-er): én konsesjon / blokk på ca. 100 000 tonn ----
+    def _skaler(ent, k, navn_map):
+        ut = []
+        for e in ent:
+            ut.append((navn_map.get(e[0], e[0]), k * e[1], k * e[2], k * e[3], k * e[4], k * e[5], e[6], e[7], e[8], e[9], k * e[10]))
+        return ut
+    _ent6 = _skaler(_entiteter(_s2, _p2, 2), 3, {
+        "Aqualoop - 2 rigger (utleier)": "Aqualoop - 6 rigger (utleier)",
+        "NOS - oppdretter x2 (leier)": "NOS - oppdretter x6 (leier)",
+        "Post-smoltanlegg (eget)": "3 post-smoltanlegg (eget)",
+    })
+    _hog6, _ps6 = 3 * _hog2, 3 * _ps2
+    _sum6 = _sum(_ent6, 1, "Konsolidert")
+    _ev6 = (_sum6[4] + _sum6[5]) / _M; _capex6 = _sum6[1] / _M; _verdi6 = _ev6 - _capex6
+    _nos6 = next(e for e in _ent6 if e[0].startswith("NOS"))
+    _nos6_ev = (_nos6[4] + _nos6[5]) / _M
+    st.markdown("---")
+    st.subheader(f"Seks Big Dippere - {fmt_int(_hog6)} t HOG/år - post-smolt {_pris2:.0f} kr/kg fra tre anlegg ({_des2.split(' –')[0]})")
+    _b1, _b2, _b3 = st.columns(3)
+    _b1.metric("Mulig verdi på én konsesjon for blokk på 100 000 tonn", f"{fmt_int(_nos6_ev)} MNOK",
+               help=f"Verdien av selve oppdrettsvirksomheten til havs: NOS oppdretter, 6 selskap, {_nos_mult:.0f}x EBITDA år 2, uten CAPEX og gjeld.")
+    _b2.metric("Indirekte verdi av totalpakken (alle tre)", f"{fmt_int(_verdi6)} MNOK",
+               help="Samlet verdiskaping (EV - CAPEX) for rigger, oppdrett og post-smoltanlegg - se fossefallet til høyre.")
+    _b3.metric("Samlet EV / CAPEX", f"{fmt_int(_ev6)} / {fmt_int(_capex6)} MNOK", help=f"EV/CAPEX {_ev6 / _capex6:.2f}x")
+    _fig6, _tab6 = _tegn(_ent6, f"Seks ABD-er (3 x to ABD-er): {fmt_int(_hog6)} t HOG laks per år ≈ én blokk på 100 000 tonn. "
+                                 f"Konsesjonen isolert (oppdrett) {fmt_int(_nos6_ev)} MNOK; totalpakken {fmt_int(_verdi6)} MNOK.", waterfall=True)
+    st.pyplot(_fig6, use_container_width=True); plt.close(_fig6)
+    st.markdown("**Én ABD**"); st.dataframe(_tab1, hide_index=True, use_container_width=True)
+    st.markdown("**To ABD-er**"); st.dataframe(_tab2, hide_index=True, use_container_width=True)
+    st.markdown("**Seks ABD-er (blokk på 100 000 tonn)**"); st.dataframe(_tab6, hide_index=True, use_container_width=True)
+    st.caption(f"Alle tall i MNOK. Rigg og post-smoltanlegg: DCF (8 % / 10x og 7 % / 12x). NOS oppdretter: {_nos_mult:.0f}x EBITDA første fulle år. "
+               "Konsolidert = de tre lagt sammen. To ABD-er = to identiske rigger og oppdrettsselskap (én rigg doblet) og ett post-smoltanlegg som leverer til begge.")
+
+
+_hovedomrade = st.container()   # brukes av Oppsummering for å tegne i hovedområdet fra sidepanel-konteksten
 with st.sidebar:
     # Diskret kodefelt - IKKE tydelig merket som "lås opp IRR" (poenget er
     # at andre som ser skjermen ikke skal legge merke til at noe er skjult
@@ -815,7 +1057,8 @@ with st.sidebar:
                 "skott_modus": "Skyveskott (fleksible vegger)", "innsett_monster": "Jevnt fordelt over året",
                 "startaar": int(bd_config.START_ISO_YEAR), "startuke": int(bd_config.START_ISO_WEEK),
                 "hog_faktor": float(bd_config.HOG_FAKTOR),
-                "smolt_pris_modus": "Fiskeverditabell (interpolert)",
+                "smolt_pris_modus": "Eget post-smolt-anlegg (kr/kg WFE)",   # standard: smolt kjøpes fra eget post-smolt-anlegg
+                "smolt_eget_pris_kr_kg": float(getattr(postsmolt_config, "POSTSMOLT_SALGSPRIS_KR_PER_KG", 100.0)),
                 "salgspris_modus": "Fast pris (kr/kg)",
             },
             # landanlegget = post-smolt-produsent på land, egen config (config_postsmolt.py):
@@ -832,8 +1075,10 @@ with st.sidebar:
                 "ps_innsett_fast": fmt_int(postsmolt_config.INNSETT_ANTALL_FAST),
                 "ps_fase2": False, "ps_fase2_overgang_g": int(postsmolt_config.FASE2_OVERGANG_G),
                 "ps_banklan": fmt_int(postsmolt_config.BANKLAN_NOK),
+                "ps_design": getattr(postsmolt_config, "DEFAULT_ANLEGG_DESIGN", None),
                 "startaar": int(postsmolt_config.LEVERANSE_START_AR) - 1, "startuke": 1,
-                "salgspris_modus": "Følger fiskeverditabellen",
+                "salgspris_modus": "Fast pris (kr/kg)",
+                "salgspris": str(int(getattr(postsmolt_config, "POSTSMOLT_SALGSPRIS_KR_PER_KG", 85.0))),
             },
         }
         # Trinn-tabellen (data_editor) nullstilles ved å fjerne nøkkelen
@@ -864,8 +1109,8 @@ with st.sidebar:
         # "Postsmolt 2x" er midlertidig SKJULT fra menyen (ikke slettet - all
         # kode, presets og logikk står urørt). Sett VIS_POSTSMOLT = True for å
         # ta den tilbake i menyen. Default-visning er SFaaS oppdrett.
-        "Produkttype / visning", options=["SFaaS oppdrett", "Konsolidert", LANDANLEGG_VALG],
-        index=0,
+        "Produkttype / visning", options=[OPPSUMMERING_VALG, "SFaaS oppdrett", "Konsolidert", LANDANLEGG_VALG],
+        index=0,   # Oppsummering er åpningssiden (bekreftet 12.09.2026)
         key="produkttype_valg", on_change=_bruk_produkttype_variant,
         help="'SFaaS oppdrett': Big Dipper slaktefisk, oppdretter (NOS) leier anlegget av Aqualoop - "
              "kapitalleie 12 %, egne regnskaper for utleier nederst. 'Konsolidert': identisk modell, men "
@@ -890,6 +1135,13 @@ with st.sidebar:
     # leverandøren eier anlegget selv -> samme regnskapsmessige oppsett som "Konsolidert"
     # (CAPEX/lån/avskrivning på egen balanse, ingen utleier-seksjoner, kapitalleie 0).
     konsolidert = (produkttype_valg in ("Konsolidert", LANDANLEGG_VALG))
+    if produkttype_valg == OPPSUMMERING_VALG:
+        # Oppsummeringen trenger ikke resten av sidepanelet - tegn den nå og stopp.
+        with _hovedomrade:
+            _render_oppsummering()
+        st.stop()
+
+
     if produkttype == "Slaktefisk":
         hog_faktor = st.number_input(
             "HOG-faktor (andel av WFE)", value=float(default_config.HOG_FAKTOR),
@@ -916,7 +1168,7 @@ with st.sidebar:
         )
     salgspris_txt = st.text_input(
         f"Salgspris (kr/kg {'HOG' if produkttype == 'Slaktefisk' else 'WFE'} solgt)",
-        value=("85" if landanlegg else "100"), key="salgspris",
+        value=(str(int(getattr(postsmolt_config, "POSTSMOLT_SALGSPRIS_KR_PER_KG", 85.0))) if landanlegg else "100"), key="salgspris",
         disabled=(salgspris_modus == "Følger fiskeverditabellen"),
     )
     if salgspris_modus == "Følger fiskeverditabellen":
@@ -970,139 +1222,165 @@ with st.sidebar:
     fastkost_divisor = 1.0 if fastkost_periode == "Per uke" else 52.0
     fixed_cost_prices = {}
 
-    with st.expander("13. Anleggskostnader landanlegget (eget anlegg) - underlinjer" if landanlegg else "13. Leie av Big Dipper-anlegg - underlinjer", expanded=False):
-        if landanlegg:
-            st.caption("leverandøren eier anlegget: kapitalleie er 0, og linjene 13.3-13.10 er leverandørens EGNE driftskostnader "
-                       "for fase 1 (vedlikehold, rengjøring, desinfeksjon, lønn, forsikring, ADK). "
-                       "CAPEX brukes til avskrivning, forsikring og banklån (se 'Eier - landanlegget' under).")
-        else:
-            st.caption("Summen av disse postene er det oppdretter skal betale Aqualoop - dette blir 13. Leie av Big Dipper-anlegg i faste kostnader under.")
-        hx = dict(default_config.HEXACAGE_LEIE_DEFAULTS)
+    if landanlegg:
+        with st.expander("13. Anleggskostnader (eget anlegg) - underlinjer 13.1-13.6", expanded=False):
+            st.caption("Anlegget eies - ingen leie. CAPEX brukes til avskrivning, forsikring og banklån (se 'Eier' under). "
+                       "Kalibrert mot Samonix (AquaMaof RAS, KPMG 2024).")
+            ad = dict(default_config.ANLEGG_DEFAULTS)
+            capex = _nok_input("CAPEX (NOK)", "hx_capex", ad["capex_nok"])
+            c1, c2 = st.columns(2)
+            teknisk_vedlikehold_ar = _nok_input("13.1 Vedlikehold anlegg (NOK/år)", "hx_teknisk_vedlikehold", ad["vedlikehold_nok_per_ar"], container=c1)
+            rengj_innv_ar = _nok_input("13.2 Rengjøring (NOK/år)", "hx_rengj_innv", ad["rengjoring_nok_per_ar"], container=c2)
+            c1, c2 = st.columns(2)
+            desinfeksjon_per_kohort_kr = _nok_input("13.3 Desinfeksjon (NOK per kohort ved innsett)", "hx_desinfeksjon", ad["desinfeksjon_nok_per_kohort"], container=c1)
+            forsikring_pct_txt = c2.text_input("13.4 Forsikring anlegg (% av CAPEX)", value=fmt_float(ad["forsikring_pct_capex"] * 100, 2), key="hx_forsikring_pct")
+            forsikring_pct = parse_number(forsikring_pct_txt, ad["forsikring_pct_capex"] * 100) / 100.0
+            forsikring_ar = capex * forsikring_pct
+            c1, c2 = st.columns(2)
+            eiendomsskatt_ar = _nok_input("13.5 Eiendomsskatt og tomt (NOK/år)", "hx_tomt", ad["eiendomsskatt_tomt_nok_per_ar"], container=c1)
+            adk_ar = _nok_input("13.6 ADK anlegg (NOK/år)", "hx_adk", ad["adk_anlegg_nok_per_ar"], container=c2)
+            # Leie-variabler som resten av appen forventer - alle 0 for eget anlegg
+            kapitalleie_pct, kapitalleie_ar = 0.0, 0.0
+            oppankring_inv, oppankring_mnd, oppankring_rente, oppankring_mnd_belop, oppankring_ar = 0.0, 60, 0.0, 0.0, 0.0
+            rengj_krager_ar = 0.0
+            lonn_lok_ar = lonn_land_ar = sosiale_lok_ar = sosiale_land_ar = sosiale_ar = 0.0
+            lonn_lok_antall = lonn_land_antall = 0
+            sosiale_pct = 0.32
+            leie_hexacage_ar = teknisk_vedlikehold_ar + rengj_innv_ar + forsikring_ar + eiendomsskatt_ar + adk_ar
+            reforhandlinger, kapitalleie_reprising = [], []   # TC-reforhandling/nybyggparitet finnes ikke for eget anlegg
+            kapitalleie_pct_sfaas, byggeindeks_pct_ar, ebitda_yield_pct = 0.0, 0.0, 0.0
+            lonn_lok_per_person = lonn_land_per_person = 0.0
+            st.markdown(f"**Sum 13. Anleggskostnader (ekskl. desinfeksjon): {fmt_int(leie_hexacage_ar)} kr/år** "
+                        f"({leie_hexacage_ar / capex * 100:.2f} % av CAPEX)")
+    else:
+      with st.expander("13. Leie av Big Dipper-anlegg - underlinjer", expanded=False):
+          st.caption("Summen av disse postene er det oppdretter skal betale Aqualoop - dette blir 13. Leie av Big Dipper-anlegg i faste kostnader under.")
+          hx = dict(default_config.HEXACAGE_LEIE_DEFAULTS)
 
-        st.markdown("**1) Kapitalleie**")
-        c1, c2 = st.columns(2)
-        capex = _nok_input("CAPEX (NOK)", "hx_capex", hx["capex_nok"], container=c1)
-        kapitalleie_pct_txt = c2.text_input("Kapitalleie-sats (%)", value=fmt_float(hx["kapitalleie_pct"] * 100, 1), key="hx_kapitalleie_pct",
-                                            disabled=konsolidert,
-                                            help="I 'Konsolidert' overstyres satsen til 0 % (ingen leie mellom Aqualoop og NOS) - "
-                                                 "verdien her beholdes for SFaaS-visningen.")
-        kapitalleie_pct = parse_number(kapitalleie_pct_txt, hx["kapitalleie_pct"] * 100) / 100.0
-        kapitalleie_pct_sfaas = kapitalleie_pct   # SFaaS-satsen - brukes til å dimensjonere banklånet i konsolidert
-        if konsolidert:
-            kapitalleie_pct = 0.0   # konsolidert: anlegg + drift under ett, ingen kapitalleie
-            st.caption("→ Konsolidert visning: kapitalleie satt til 0 % i beregningen (SFaaS-satsen over beholdes).")
-        # Reforhandling av TC underveis (inntil to ganger): velg ÅR i rullegardin
-        # og hvor stor andel av GAPET til nybyggparitet som skal hentes inn.
-        # Selve den nye satsen regnes ut lenger ned (der eskaleringstabellen er
-        # kjent) og vises i "Nybyggparitet"-tabellen under Utleier.
-        _rp_ar_valg = ["Ikke i bruk"] + [str(y) for y in range(int(st.session_state.get("startaar", default_config.START_ISO_YEAR)) + 1,
-                                                              int(st.session_state.get("startaar", default_config.START_ISO_YEAR)) + int(default_config.N_YEARS_TO_RUN) + 1)]
-        reforhandlinger = []
-        _rf_def = ([{"ar": None, "andel": 0.5}] * 2 if konsolidert
-                   else getattr(default_config, "TC_REFORHANDLING_DEFAULTS", [{"ar": None, "andel": 0.5}] * 2))
-        if not konsolidert:
-            st.caption("Reforhandling av TC (ny kapitalleie-sats) underveis - gjelder fra 1. januar valgt år. "
-                       "Ny TC = dagens (eskalerte) TC + valgt andel av gapet opp til nybyggparitet det året.")
-        for _k in (range(2) if not konsolidert else []):
-            _ca, _cb = st.columns(2)
-            _def_ar = str(_rf_def[_k]["ar"]) if _rf_def[_k].get("ar") else "Ikke i bruk"
-            _def_idx = _rp_ar_valg.index(_def_ar) if _def_ar in _rp_ar_valg else 0
-            _rp_ar_txt = _ca.selectbox(f"Reforhandling {_k + 1}: år", options=_rp_ar_valg, index=_def_idx, key=f"hx_reforh_ar_{_k}")
-            _rp_andel = _cb.number_input(f"Andel av gap til nybyggparitet (%)", min_value=0.0, max_value=200.0,
-                                         value=float(_rf_def[_k].get("andel", 0.5)) * 100, step=5.0, format="%.0f", key=f"hx_reforh_andel_{_k}",
-                                         help="100 % = helt opp til nybyggparitet, 50 % = halvveis, 0 % = uendret.")
-            if _rp_ar_txt != "Ikke i bruk":
-                reforhandlinger.append({"ar": int(_rp_ar_txt), "andel": _rp_andel / 100.0})
-        kapitalleie_reprising = []   # fylles ut senere (år, sats) når eskaleringen er kjent
-        _np = getattr(default_config, "NYBYGGPARITET_DEFAULTS", {"byggeindeks_pct_ar": 0.04, "ebitda_yield_pct": 0.12})
-        byggeindeks_pct_ar, ebitda_yield_pct = _np["byggeindeks_pct_ar"], _np["ebitda_yield_pct"]
-        if not konsolidert:
-            st.markdown("**Nybyggparitet (guide for ny TC)**")
-            _c1, _c2 = st.columns(2)
-            byggeindeks_txt = _c1.text_input("Byggeindeks (%/år)", value=fmt_float(_np["byggeindeks_pct_ar"] * 100, 1), key="np_byggeindeks")
-            ebitda_yield_txt = _c2.text_input("EBITDA-yield på nybyggpris (%)", value=fmt_float(_np["ebitda_yield_pct"] * 100, 1), key="np_yield")
-            byggeindeks_pct_ar = parse_number(byggeindeks_txt, _np["byggeindeks_pct_ar"] * 100) / 100.0
-            ebitda_yield_pct = parse_number(ebitda_yield_txt, _np["ebitda_yield_pct"] * 100) / 100.0
-        if not konsolidert:
-          st.caption(f"→ Nybyggpris = CAPEX x (1 + {byggeindeks_pct_ar*100:.1f} %)^år siden {int(default_config.START_ISO_YEAR)}; "
-                   f"EBITDA-krav = nybyggpris x {ebitda_yield_pct*100:.1f} %; guide-TC = EBITDA-krav + årets driftskostnader i "
-                   "leien. Tabellen ligger under 'Lønnsomhet - Utleier'.")
-        kapitalleie_ar = capex * kapitalleie_pct
-        st.caption(f"→ Kapitalleie: {fmt_int(kapitalleie_ar)} kr/år")
+          st.markdown("**1) Kapitalleie**")
+          c1, c2 = st.columns(2)
+          capex = _nok_input("CAPEX (NOK)", "hx_capex", hx["capex_nok"], container=c1)
+          kapitalleie_pct_txt = c2.text_input("Kapitalleie-sats (%)", value=fmt_float(hx["kapitalleie_pct"] * 100, 1), key="hx_kapitalleie_pct",
+                                              disabled=konsolidert,
+                                              help="I 'Konsolidert' overstyres satsen til 0 % (ingen leie mellom Aqualoop og NOS) - "
+                                                   "verdien her beholdes for SFaaS-visningen.")
+          kapitalleie_pct = parse_number(kapitalleie_pct_txt, hx["kapitalleie_pct"] * 100) / 100.0
+          kapitalleie_pct_sfaas = kapitalleie_pct   # SFaaS-satsen - brukes til å dimensjonere banklånet i konsolidert
+          if konsolidert:
+              kapitalleie_pct = 0.0   # konsolidert: anlegg + drift under ett, ingen kapitalleie
+              st.caption("→ Konsolidert visning: kapitalleie satt til 0 % i beregningen (SFaaS-satsen over beholdes).")
+          # Reforhandling av TC underveis (inntil to ganger): velg ÅR i rullegardin
+          # og hvor stor andel av GAPET til nybyggparitet som skal hentes inn.
+          # Selve den nye satsen regnes ut lenger ned (der eskaleringstabellen er
+          # kjent) og vises i "Nybyggparitet"-tabellen under Utleier.
+          _rp_ar_valg = ["Ikke i bruk"] + [str(y) for y in range(int(st.session_state.get("startaar", default_config.START_ISO_YEAR)) + 1,
+                                                                int(st.session_state.get("startaar", default_config.START_ISO_YEAR)) + int(default_config.N_YEARS_TO_RUN) + 1)]
+          reforhandlinger = []
+          _rf_def = ([{"ar": None, "andel": 0.5}] * 2 if konsolidert
+                     else getattr(default_config, "TC_REFORHANDLING_DEFAULTS", [{"ar": None, "andel": 0.5}] * 2))
+          if not konsolidert:
+              st.caption("Reforhandling av TC (ny kapitalleie-sats) underveis - gjelder fra 1. januar valgt år. "
+                         "Ny TC = dagens (eskalerte) TC + valgt andel av gapet opp til nybyggparitet det året.")
+          for _k in (range(2) if not konsolidert else []):
+              _ca, _cb = st.columns(2)
+              _def_ar = str(_rf_def[_k]["ar"]) if _rf_def[_k].get("ar") else "Ikke i bruk"
+              _def_idx = _rp_ar_valg.index(_def_ar) if _def_ar in _rp_ar_valg else 0
+              _rp_ar_txt = _ca.selectbox(f"Reforhandling {_k + 1}: år", options=_rp_ar_valg, index=_def_idx, key=f"hx_reforh_ar_{_k}")
+              _rp_andel = _cb.number_input(f"Andel av gap til nybyggparitet (%)", min_value=0.0, max_value=200.0,
+                                           value=float(_rf_def[_k].get("andel", 0.5)) * 100, step=5.0, format="%.0f", key=f"hx_reforh_andel_{_k}",
+                                           help="100 % = helt opp til nybyggparitet, 50 % = halvveis, 0 % = uendret.")
+              if _rp_ar_txt != "Ikke i bruk":
+                  reforhandlinger.append({"ar": int(_rp_ar_txt), "andel": _rp_andel / 100.0})
+          kapitalleie_reprising = []   # fylles ut senere (år, sats) når eskaleringen er kjent
+          _np = getattr(default_config, "NYBYGGPARITET_DEFAULTS", {"byggeindeks_pct_ar": 0.04, "ebitda_yield_pct": 0.12})
+          byggeindeks_pct_ar, ebitda_yield_pct = _np["byggeindeks_pct_ar"], _np["ebitda_yield_pct"]
+          if not konsolidert:
+              st.markdown("**Nybyggparitet (guide for ny TC)**")
+              _c1, _c2 = st.columns(2)
+              byggeindeks_txt = _c1.text_input("Byggeindeks (%/år)", value=fmt_float(_np["byggeindeks_pct_ar"] * 100, 1), key="np_byggeindeks")
+              ebitda_yield_txt = _c2.text_input("EBITDA-yield på nybyggpris (%)", value=fmt_float(_np["ebitda_yield_pct"] * 100, 1), key="np_yield")
+              byggeindeks_pct_ar = parse_number(byggeindeks_txt, _np["byggeindeks_pct_ar"] * 100) / 100.0
+              ebitda_yield_pct = parse_number(ebitda_yield_txt, _np["ebitda_yield_pct"] * 100) / 100.0
+          if not konsolidert:
+            st.caption(f"→ Nybyggpris = CAPEX x (1 + {byggeindeks_pct_ar*100:.1f} %)^år siden {int(default_config.START_ISO_YEAR)}; "
+                     f"EBITDA-krav = nybyggpris x {ebitda_yield_pct*100:.1f} %; guide-TC = EBITDA-krav + årets driftskostnader i "
+                     "leien. Tabellen ligger under 'Lønnsomhet - Utleier'.")
+          kapitalleie_ar = capex * kapitalleie_pct
+          st.caption(f"→ Kapitalleie: {fmt_int(kapitalleie_ar)} kr/år")
 
-        st.markdown("**2) Oppankring (annuitetslån)**")
-        c1, c2, c3 = st.columns(3)
-        oppankring_inv = _nok_input("Investering (NOK)", "hx_oppankring_inv", hx["oppankring_investering_nok"], container=c1)
-        oppankring_mnd = c2.number_input("Nedbetaling (mnd)", value=int(hx["oppankring_nedbetaling_maneder"]), min_value=1, key="hx_oppankring_mnd")
-        oppankring_rente_txt = c3.text_input("Rente (%/år)", value=fmt_float(hx["oppankring_rente_pct_ar"] * 100, 1), key="hx_oppankring_rente")
-        oppankring_rente = parse_number(oppankring_rente_txt, hx["oppankring_rente_pct_ar"] * 100) / 100.0
-        oppankring_mnd_belop = annuitet_manedsbelop(oppankring_inv, oppankring_rente, int(oppankring_mnd))
-        oppankring_ar = oppankring_mnd_belop * 12
-        st.caption(f"→ Annuitet: {fmt_int(oppankring_mnd_belop)} kr/mnd = {fmt_int(oppankring_ar)} kr/år")
+          st.markdown("**2) Oppankring (annuitetslån)**")
+          c1, c2, c3 = st.columns(3)
+          oppankring_inv = _nok_input("Investering (NOK)", "hx_oppankring_inv", hx["oppankring_investering_nok"], container=c1)
+          oppankring_mnd = c2.number_input("Nedbetaling (mnd)", value=int(hx["oppankring_nedbetaling_maneder"]), min_value=1, key="hx_oppankring_mnd")
+          oppankring_rente_txt = c3.text_input("Rente (%/år)", value=fmt_float(hx["oppankring_rente_pct_ar"] * 100, 1), key="hx_oppankring_rente")
+          oppankring_rente = parse_number(oppankring_rente_txt, hx["oppankring_rente_pct_ar"] * 100) / 100.0
+          oppankring_mnd_belop = annuitet_manedsbelop(oppankring_inv, oppankring_rente, int(oppankring_mnd))
+          oppankring_ar = oppankring_mnd_belop * 12
+          st.caption(f"→ Annuitet: {fmt_int(oppankring_mnd_belop)} kr/mnd = {fmt_int(oppankring_ar)} kr/år")
 
-        st.markdown("**3) Teknisk vedlikehold (NY - del av leiebeløpet, gjennomfakturert kost)**")
-        teknisk_vedlikehold_ar = _nok_input(
-            "Teknisk vedlikehold (NOK/år, startår)", "hx_teknisk_vedlikehold",
-            hx.get("teknisk_vedlikehold_nok_per_ar", 1_000_000.0),
-        )
-        st.caption(
-            "→ Del av '13. Leie' (belastes oppdretter), og telles automatisk med i BÅDE "
-            "Leieinntekter OG Driftskostnader i Lønnsomhet-Utleier-modellen lenger ned "
-            "(går i null der - ren gjennomfakturering, samme prinsipp som de andre "
-            "driftskostnad-linjene 13.4-13.10)."
-        )
+          st.markdown("**3) Teknisk vedlikehold (NY - del av leiebeløpet, gjennomfakturert kost)**")
+          teknisk_vedlikehold_ar = _nok_input(
+              "Teknisk vedlikehold (NOK/år, startår)", "hx_teknisk_vedlikehold",
+              hx.get("teknisk_vedlikehold_nok_per_ar", 1_000_000.0),
+          )
+          st.caption(
+              "→ Del av '13. Leie' (belastes oppdretter), og telles automatisk med i BÅDE "
+              "Leieinntekter OG Driftskostnader i Lønnsomhet-Utleier-modellen lenger ned "
+              "(går i null der - ren gjennomfakturering, samme prinsipp som de andre "
+              "driftskostnad-linjene 13.4-13.10)."
+          )
 
-        st.markdown("**4) Årlig rengjøring innvendig**")
-        rengj_innv_ar = _nok_input("Rengjøring innvendig (NOK/år)", "hx_rengj_innv", hx["rengjoring_innvendig_nok_per_ar"])
+          st.markdown("**4) Årlig rengjøring innvendig**")
+          rengj_innv_ar = _nok_input("Rengjøring innvendig (NOK/år)", "hx_rengj_innv", hx["rengjoring_innvendig_nok_per_ar"])
 
-        st.markdown("**5) Årlig rengjøring av krager**")
-        rengj_krager_ar = _nok_input("Rengjøring av krager (NOK/år)", "hx_rengj_krager", hx["rengjoring_krager_nok_per_ar"])
+          st.markdown("**5) Årlig rengjøring av krager**")
+          rengj_krager_ar = _nok_input("Rengjøring av krager (NOK/år)", "hx_rengj_krager", hx["rengjoring_krager_nok_per_ar"])
 
-        st.markdown("**6) Desinfeksjon**")
-        desinfeksjon_per_kohort_kr = _nok_input("Desinfeksjon (NOK per kohort/generasjon)", "hx_desinfeksjon", hx["desinfeksjon_nok_per_kohort"])
-        st.caption(
-            "→ Engangsbeløp PER KOHORT (ikke en jevn ukentlig/årlig sats) - påløper kun i "
-            "uken en ny kohort settes inn. Beregnes ut fra faktisk antall kohorter i "
-            "simuleringen, vises i 'Konsolidert kontantstrøm' nederst - ikke lagt inn i "
-            "kr/år-summen under."
-        )
+          st.markdown("**6) Desinfeksjon**")
+          desinfeksjon_per_kohort_kr = _nok_input("Desinfeksjon (NOK per kohort/generasjon)", "hx_desinfeksjon", hx["desinfeksjon_nok_per_kohort"])
+          st.caption(
+              "→ Engangsbeløp PER KOHORT (ikke en jevn ukentlig/årlig sats) - påløper kun i "
+              "uken en ny kohort settes inn. Beregnes ut fra faktisk antall kohorter i "
+              "simuleringen, vises i 'Konsolidert kontantstrøm' nederst - ikke lagt inn i "
+              "kr/år-summen under."
+          )
 
-        st.markdown("**7) Lønn lokalitet**")
-        c1, c2 = st.columns(2)
-        lonn_lok_per_person = _nok_input("Lønn lokalitet (NOK/år, per person)", "hx_lonn_lok", hx["lonn_lokalitet_nok_per_ar"], container=c1)
-        lonn_lok_antall = c2.number_input("Antall lokalitet", value=int(hx["lonn_lokalitet_antall"]), min_value=0, key="hx_lonn_lok_antall")
-        lonn_lok_ar = lonn_lok_per_person * lonn_lok_antall
+          st.markdown("**7) Lønn lokalitet**")
+          c1, c2 = st.columns(2)
+          lonn_lok_per_person = _nok_input("Lønn lokalitet (NOK/år, per person)", "hx_lonn_lok", hx["lonn_lokalitet_nok_per_ar"], container=c1)
+          lonn_lok_antall = c2.number_input("Antall lokalitet", value=int(hx["lonn_lokalitet_antall"]), min_value=0, key="hx_lonn_lok_antall")
+          lonn_lok_ar = lonn_lok_per_person * lonn_lok_antall
 
-        st.markdown("**8) Lønn land**")
-        c1, c2 = st.columns(2)
-        lonn_land_per_person = _nok_input("Lønn land (NOK/år, per person)", "hx_lonn_land", hx["lonn_land_nok_per_ar"], container=c1)
-        lonn_land_antall = c2.number_input("Antall land", value=int(hx["lonn_land_antall"]), min_value=0, key="hx_lonn_land_antall")
-        lonn_land_ar = lonn_land_per_person * lonn_land_antall
+          st.markdown("**8) Lønn land**")
+          c1, c2 = st.columns(2)
+          lonn_land_per_person = _nok_input("Lønn land (NOK/år, per person)", "hx_lonn_land", hx["lonn_land_nok_per_ar"], container=c1)
+          lonn_land_antall = c2.number_input("Antall land", value=int(hx["lonn_land_antall"]), min_value=0, key="hx_lonn_land_antall")
+          lonn_land_ar = lonn_land_per_person * lonn_land_antall
 
-        sosiale_pct_txt = st.text_input("Sosiale kostnader (% av lønn lokalitet + land)", value=fmt_float(hx["sosiale_kostnader_pct"] * 100, 1), key="hx_sosiale_pct")
-        sosiale_pct = parse_number(sosiale_pct_txt, hx["sosiale_kostnader_pct"] * 100) / 100.0
-        sosiale_lok_ar = lonn_lok_ar * sosiale_pct
-        sosiale_land_ar = lonn_land_ar * sosiale_pct
-        sosiale_ar = sosiale_lok_ar + sosiale_land_ar
-        st.caption(
-            f"→ Lønn lokalitet {fmt_int(lonn_lok_ar)} (+ {fmt_int(sosiale_lok_ar)} sosiale kostnader) "
-            f"+ lønn land {fmt_int(lonn_land_ar)} (+ {fmt_int(sosiale_land_ar)} sosiale kostnader)"
-        )
+          sosiale_pct_txt = st.text_input("Sosiale kostnader (% av lønn lokalitet + land)", value=fmt_float(hx["sosiale_kostnader_pct"] * 100, 1), key="hx_sosiale_pct")
+          sosiale_pct = parse_number(sosiale_pct_txt, hx["sosiale_kostnader_pct"] * 100) / 100.0
+          sosiale_lok_ar = lonn_lok_ar * sosiale_pct
+          sosiale_land_ar = lonn_land_ar * sosiale_pct
+          sosiale_ar = sosiale_lok_ar + sosiale_land_ar
+          st.caption(
+              f"→ Lønn lokalitet {fmt_int(lonn_lok_ar)} (+ {fmt_int(sosiale_lok_ar)} sosiale kostnader) "
+              f"+ lønn land {fmt_int(lonn_land_ar)} (+ {fmt_int(sosiale_land_ar)} sosiale kostnader)"
+          )
 
-        st.markdown("**9) Forsikring anlegg og fartøy**")
-        forsikring_pct_txt = st.text_input(
-            "Forsikring-sats (% av CAPEX)", value=fmt_float(hx["forsikring_pct"] * 100, 2), key="hx_forsikring_pct",
-        )
-        forsikring_pct = parse_number(forsikring_pct_txt, hx["forsikring_pct"] * 100) / 100.0
-        forsikring_ar = capex * forsikring_pct
-        st.caption(f"→ Forsikring: {fmt_int(capex)} x {forsikring_pct*100:.2f} % = {fmt_int(forsikring_ar)} kr/år")
+          st.markdown("**9) Forsikring anlegg og fartøy**")
+          forsikring_pct_txt = st.text_input(
+              "Forsikring-sats (% av CAPEX)", value=fmt_float(hx["forsikring_pct"] * 100, 2), key="hx_forsikring_pct",
+          )
+          forsikring_pct = parse_number(forsikring_pct_txt, hx["forsikring_pct"] * 100) / 100.0
+          forsikring_ar = capex * forsikring_pct
+          st.caption(f"→ Forsikring: {fmt_int(capex)} x {forsikring_pct*100:.2f} % = {fmt_int(forsikring_ar)} kr/år")
 
-        st.markdown("**10) ADK (andre driftskostnader)**")
-        adk_ar = _nok_input("ADK (NOK/år)", "hx_adk", hx["adk_nok_per_ar"])
+          st.markdown("**10) ADK (andre driftskostnader)**")
+          adk_ar = _nok_input("ADK (NOK/år)", "hx_adk", hx["adk_nok_per_ar"])
 
-        leie_hexacage_ar = (kapitalleie_ar + oppankring_ar + teknisk_vedlikehold_ar + rengj_innv_ar + rengj_krager_ar +
-                            lonn_lok_ar + lonn_land_ar + sosiale_ar + forsikring_ar + adk_ar)
-        st.markdown(f"**Sum - 13. Leie av Big Dipper-anlegg (ekskl. desinfeksjon): {fmt_int(leie_hexacage_ar)} kr/år**")
+          leie_hexacage_ar = (kapitalleie_ar + oppankring_ar + teknisk_vedlikehold_ar + rengj_innv_ar + rengj_krager_ar +
+                              lonn_lok_ar + lonn_land_ar + sosiale_ar + forsikring_ar + adk_ar)
+          st.markdown(f"**Sum - {'13. Anleggskostnader, eget anlegg' if landanlegg else '13. Leie av Big Dipper-anlegg'} (ekskl. desinfeksjon): {fmt_int(leie_hexacage_ar)} kr/år**")
 
     if not konsolidert:
         with st.expander("Lønnsomhet - Utleier (Big Dipper/Aqualoop) - forutsetninger", expanded=False):
@@ -1236,7 +1514,21 @@ with st.sidebar:
             "Forutsetningene settes under 'SFaaS oppdrett'."
         )
 
-    hexacage_sublinjer = [
+    if landanlegg:
+        hexacage_sublinjer = [
+            {"id": "leie_13_teknisk", "navn": "13.1 Vedlikehold anlegg"},
+            {"id": "leie_133", "navn": "13.2 Rengjøring"},
+            {"id": "leie_135", "navn": "13.3 Desinfeksjon (per kohort)"},
+            {"id": "leie_138", "navn": "13.4 Forsikring anlegg"},
+            {"id": "leie_tomt", "navn": "13.5 Eiendomsskatt og tomt"},
+            {"id": "leie_139", "navn": "13.6 ADK anlegg"},
+        ]
+        hexacage_sublinjer_ar = {
+            "leie_13_teknisk": teknisk_vedlikehold_ar, "leie_133": rengj_innv_ar, "leie_135": 0.0,
+            "leie_138": forsikring_ar, "leie_tomt": eiendomsskatt_ar, "leie_139": adk_ar,
+        }
+    else:
+      hexacage_sublinjer = [
         {"id": "leie_131", "navn": "13.1 Kapitalleie"},
         {"id": "leie_132", "navn": "13.2 Oppankring"},
         {"id": "leie_13_teknisk", "navn": "13.3 Teknisk vedlikehold"},
@@ -1247,14 +1539,14 @@ with st.sidebar:
         {"id": "leie_137", "navn": "13.8 Lønn land (inkl. sosiale kostnader)"},
         {"id": "leie_138", "navn": "13.9 Forsikring"},
         {"id": "leie_139", "navn": "13.10 ADK"},
-    ]
-    hexacage_sublinjer_ar = {
+      ]
+      hexacage_sublinjer_ar = {
         "leie_131": kapitalleie_ar, "leie_132": oppankring_ar, "leie_13_teknisk": teknisk_vedlikehold_ar,
         "leie_133": rengj_innv_ar, "leie_134": rengj_krager_ar,
         "leie_135": 0.0,  # desinfeksjon er hendelsesbasert - satt inn separat, se lenger ned
         "leie_136": lonn_lok_ar + sosiale_lok_ar, "leie_137": lonn_land_ar + sosiale_land_ar,
         "leie_138": forsikring_ar, "leie_139": adk_ar,
-    }
+      }
 
     fixed_cost_prices["leie_anlegg"] = leie_hexacage_ar / 52.0
     hexacage_sublinjer_kr_per_uke = {k: v / 52.0 for k, v in hexacage_sublinjer_ar.items()}
@@ -1272,8 +1564,37 @@ with st.sidebar:
     # i koden. Riktig mønster er å så st.session_state direkte FØR widgeten
     # opprettes (kun hvis nøkkelen ikke finnes fra før - overskriver ALDRI
     # noe brukeren selv har skrevet inn).
+    if landanlegg:
+        with st.expander("14. Produksjonslønn (fast) - 14.1-14.3", expanded=False):
+            pl = dict(default_config.PRODUKSJONSLONN_DEFAULTS)
+            c1, c2 = st.columns(2)
+            pl_op_n = int(c1.number_input("14.1 Driftsoperatører (antall)", min_value=0, value=int(pl["operatorer_antall"]), key="pl_op_n"))
+            pl_op_lonn = _nok_input("14.1 Lønn per operatør (NOK/år)", "pl_op_lonn", pl["operatorer_lonn_nok"], container=c2)
+            c1, c2 = st.columns(2)
+            pl_bio_n = int(c1.number_input("14.2 Biologi/kvalitet (antall)", min_value=0, value=int(pl["biologi_antall"]), key="pl_bio_n"))
+            pl_bio_lonn = _nok_input("14.2 Lønn per biolog (NOK/år)", "pl_bio_lonn", pl["biologi_lonn_nok"], container=c2)
+            pl_sos_txt = st.text_input("14.3 Sosiale kostnader (%)", value=fmt_float(pl["sosiale_kostnader_pct"] * 100, 1), key="pl_sos_pct")
+            pl_sos = parse_number(pl_sos_txt, pl["sosiale_kostnader_pct"] * 100) / 100.0
+            prodlonn_ar = (pl_op_n * pl_op_lonn + pl_bio_n * pl_bio_lonn) * (1 + pl_sos)
+            st.markdown(f"**Sum 14. Produksjonslønn: {fmt_int(prodlonn_ar)} kr/år** ({pl_op_n + pl_bio_n} årsverk inkl. {pl_sos*100:.0f} % sosiale)")
+        fixed_cost_prices["prodlonn"] = prodlonn_ar / 52.0
+        with st.expander("15. Administrasjon - 15.1-15.3", expanded=False):
+            am = dict(default_config.ADMINISTRASJON_DEFAULTS)
+            c1, c2 = st.columns(2)
+            am_n = int(c1.number_input("15.1 Administrative ansatte (antall)", min_value=0, value=int(am["adm_antall"]), key="am_n"))
+            am_lonn = _nok_input("15.1 Lønn per ansatt (NOK/år)", "am_lonn", am["adm_lonn_nok"], container=c2)
+            am_sos_txt = st.text_input("Sosiale kostnader (%)", value=fmt_float(am["sosiale_kostnader_pct"] * 100, 1), key="am_sos_pct")
+            am_sos = parse_number(am_sos_txt, am["sosiale_kostnader_pct"] * 100) / 100.0
+            c1, c2 = st.columns(2)
+            am_rev = _nok_input("15.2 Revisjon, jus, rådgivning (NOK/år)", "am_rev", am["revisjon_jus_radgivning_nok_per_ar"], container=c1)
+            am_kontor = _nok_input("15.3 Kontor, IT, reise (NOK/år)", "am_kontor", am["kontor_it_reise_nok_per_ar"], container=c2)
+            administrasjon_ar = am_n * am_lonn * (1 + am_sos) + am_rev + am_kontor
+            st.markdown(f"**Sum 15. Administrasjon: {fmt_int(administrasjon_ar)} kr/år**")
+        fixed_cost_prices["administrasjon"] = administrasjon_ar / 52.0
     _fastkost_default_ar = {k: (v * 52.0 if v else None) for k, v in default_config.FIXED_COST_KR_PER_UKE.items()}
     for fc in default_config.FIXED_COSTS:
+        if landanlegg and fc["id"] in ("prodlonn", "administrasjon"):
+            continue  # satt i boksene over
         if fc["id"] == "leie_anlegg":
             continue  # dekket av underseksjonen over
         enhet = "kr/uke" if fastkost_periode == "Per uke" else "kr/år"
@@ -1292,7 +1613,7 @@ with st.sidebar:
         txt = st.text_input(f"{fc['navn']} ({enhet})", key=widget_key, on_change=_reformat_fastkost)
         fixed_cost_prices[fc["id"]] = (parse_number(txt) / fastkost_divisor) if txt.strip() else None
 
-    with st.expander("Nåverdi (DCF) - oppdretters kontantstrøm", expanded=False):
+    with st.expander("Nåverdi (DCF) - landanleggets kontantstrøm" if landanlegg else "Nåverdi (DCF) - oppdretters kontantstrøm", expanded=False):
         _dcf = getattr(default_config, "DCF_DEFAULTS", {})
         st.caption("Totalkapitalmodellen (ubelånt): fri kontantstrøm til totalkapitalen (EBITDA - skatt på EBIT - "
                    "investeringer - endring arbeidskapital) diskonteres med ubelånt avkastningskrav fra CAPM: "
@@ -1303,7 +1624,10 @@ with st.sidebar:
         dcf_mp_pct = parse_number(d2.text_input("Markedspremie (%)", value=fmt_float(_dcf.get("mp_pct", 0.05) * 100, 2), key="dcf_mp"), 5.0) / 100.0
         dcf_beta = parse_number(d3.text_input("Eiendelsbeta (ubelånt)", value=fmt_float(_dcf.get("beta", 0.80), 2), key="dcf_beta"), 0.80)
         d4, d5 = st.columns(2)
-        dcf_horisont = int(d4.number_input("Horisont (år)", min_value=3, max_value=int(default_config.N_YEARS_TO_RUN), value=int(_dcf.get("horisont_ar", 10)), step=1, key="dcf_horisont"))
+        _dcf_maks = max(3, int(default_config.N_YEARS_TO_RUN))
+        if "dcf_horisont" in st.session_state and int(st.session_state["dcf_horisont"]) > _dcf_maks:
+            st.session_state["dcf_horisont"] = _dcf_maks   # verdi fra en annen visning/preset kan overstige maks
+        dcf_horisont = int(d4.number_input("Horisont (år)", min_value=3, max_value=_dcf_maks, value=min(int(_dcf.get("horisont_ar", 10)), _dcf_maks), step=1, key="dcf_horisont"))
         dcf_multippel = parse_number(d5.text_input("EV/EBITDA sluttverdi (x)", value=fmt_float(_dcf.get("ev_ebitda", 10.0), 1), key="dcf_mult"), 10.0)
         dcf_r = dcf_rf_pct + dcf_beta * dcf_mp_pct
         st.caption(f"→ Avkastningskrav totalkapital: {dcf_rf_pct*100:.2f} % + {dcf_beta:.2f} x {dcf_mp_pct*100:.2f} % = {dcf_r*100:.2f} %")
@@ -1354,6 +1678,36 @@ with st.sidebar:
         st.caption("Hver kohort leveres i uken NOS setter inn i Big Dipper (første mandag i jan/mar/mai/jul/sep/nov "
                    "for ABD 1, feb/apr/... for ABD 2) og settes inn ved 30 g det antall vekstuker FØR som trengs "
                    "for å nå leveringsvekten ved valgt RAS-temperatur. Kapasiteten sjekkes per trinn (karpool).")
+        _designs = getattr(default_config, "ANLEGG_DESIGN", {})
+
+        def _bruk_anleggsdesign():
+            d = _designs[st.session_state["ps_design"]]
+            st.session_state["ps_n_abd"] = int(d["n_abd"])
+            st.session_state["hx_capex"] = fmt_int(d["capex_nok"])
+            st.session_state["ps_banklan"] = fmt_int(d["banklan_nok"])
+            if "operatorer_antall" in d:
+                st.session_state["pl_op_n"] = int(d["operatorer_antall"])
+            if "biologi_antall" in d:
+                st.session_state["pl_bio_n"] = int(d["biologi_antall"])
+            if "vedlikehold_nok_per_ar" in d:
+                st.session_state["hx_teknisk_vedlikehold"] = fmt_int(d["vedlikehold_nok_per_ar"])
+            if "salgspris_kr_kg" in d:
+                st.session_state["salgspris"] = str(int(d["salgspris_kr_kg"]))
+                st.session_state["salgspris_modus"] = "Fast pris (kr/kg)"
+            st.session_state.pop("ps_trinn_editor", None)
+
+        if _designs:
+            ps_design = st.radio(
+                "Anleggsdesign", options=list(_designs.keys()),
+                index=list(_designs.keys()).index(getattr(default_config, "DEFAULT_ANLEGG_DESIGN", list(_designs)[0])),
+                key="ps_design", on_change=_bruk_anleggsdesign,
+                help="Setter antall ABD, karpooler per trinn, CAPEX og banklån samlet. Alle felt kan justeres etterpå.",
+            )
+            st.caption(_designs[ps_design]["beskrivelse"] + f" CAPEX {fmt_int(_designs[ps_design]['capex_nok'])} kr "
+                       f"(satt i '13. Anleggskostnader'), banklån {fmt_int(_designs[ps_design]['banklan_nok'])} kr (satt i 'Eier').")
+            _design_trinn = _designs[ps_design]["trinn"]
+        else:
+            _design_trinn = {}
         c_a, c_b = st.columns(2)
         ps_n_abd = int(c_a.radio("Antall Big Dipper (ABD) å levere til", options=[1, 2], index=0, key="ps_n_abd", horizontal=True,
                                  help="1 ABD = 6 leveranser/år. 2 ABD = 12 leveranser/år (krever normalt fase 2-hallen)."))
@@ -1375,8 +1729,10 @@ with st.sidebar:
         st.caption("Fisken tilhører trinnet etter vekt. m³-behov = stående biomasse / tetthetstak; karbehov rundes OPP per "
                    "kohort (et kar deles ikke mellom kohorter). Tetthetstak 50 kg/m³ er bekreftet for post-smolt; yngel/smolt er antakelser.")
         _trinn_def = pd.DataFrame([
-            {"Trinn": t["navn"], "Aktiv": bool(t["aktiv"]), "Antall kar": int(t["antall_kar"]), "Karvolum (m³)": float(t["kar_volum_m3"]),
-             "Tetthetstak (kg/m³)": float(t["tetthetstak_kg_m3"]),
+            {"Trinn": t["navn"], "Aktiv": bool(t["aktiv"]),
+             "Antall kar": int(_design_trinn.get(t["id"], (t["antall_kar"],))[0]),
+             "Karvolum (m³)": float(_design_trinn.get(t["id"], (0, t["kar_volum_m3"]))[1]),
+             "Tetthetstak (kg/m³)": float(_design_trinn.get(t["id"], (0, 0, t["tetthetstak_kg_m3"]))[2]),
              "Fra (g)": (float(t["vekt_fra_g"]) if t["vekt_fra_g"] is not None else None),
              "Til (g)": (float(t["vekt_til_g"]) if t["vekt_til_g"] is not None else None)}
             for t in default_config.TRINN
@@ -1644,18 +2000,37 @@ with st.sidebar:
             default_price_str = str(default_price)
         if r["kilde"] == "smolt":
             st.caption("Enhet: 1 stk per kjøpt smolt")
+            _smolt_valg = ["Formel (fastdel + sats × vekt)", "Fiskeverditabell (interpolert)"]
+            if not landanlegg:
+                _smolt_valg.append("Eget post-smolt-anlegg (kr/kg WFE)")
+            if st.session_state.get("smolt_pris_modus") not in (None, *_smolt_valg):
+                st.session_state["smolt_pris_modus"] = _smolt_valg[0]
+
+            def _eget_anlegg_pris_default() -> float:
+                """Implisitt startpris fra eget post-smolt-anlegg: prisen satt i visningen
+                'Post-smolt landanlegg' i denne økten hvis den finnes, ellers config-default."""
+                return float(st.session_state.get("landanlegg_salgspris_kr_kg",
+                                                  getattr(postsmolt_config, "POSTSMOLT_SALGSPRIS_KR_PER_KG", 100.0)))
+
+            def _ved_smoltpris_valg():
+                if str(st.session_state.get("smolt_pris_modus", "")).startswith("Eget"):
+                    st.session_state["smolt_eget_pris_kr_kg"] = _eget_anlegg_pris_default()
+
             smolt_pris_modus = st.radio(
-                "Smoltpris-modell", options=["Formel (fastdel + sats × vekt)", "Fiskeverditabell (interpolert)"],
-                index=0 if default_config.SMOLT_PRIS_MODUS == "Formel" else 1,
-                key="smolt_pris_modus",
+                "Smoltpris-modell", options=_smolt_valg,
+                index=(2 if not landanlegg else (0 if default_config.SMOLT_PRIS_MODUS == "Formel" else 1)),   # BD-visningene: eget anlegg som standard (bekreftet 12.09.2026)
+                key="smolt_pris_modus", on_change=_ved_smoltpris_valg,
                 help="'Formel': fastdel (kr) + sats (kr/gram) x smoltvekt, som før. 'Fiskeverditabell': "
                      "kr/kg fra en fast tabell (60 g-1000 g), interpolert lineært mellom punktene til "
                      "DEN spesifikke kohortens/oppskriftens egen smoltvekt. Vekt over 1000 g bruker "
                      "1000 g sin sats (ingen ekstrapolering utenfor tabellen). Salgsprisen på FERDIG "
                      "levert/slaktet fisk er UPÅVIRKET av dette valget - kun kostnaden ved KJØP av "
-                     "smolt (0. Kjøpt smolt) styres av denne bryteren.",
+                     "smolt (0. Kjøpt smolt) styres av denne bryteren. 'Eget post-smolt-anlegg': kjøpt til samme "
+                     "kr/kg WFE som post-smolt-anlegget selger for (visningen 'Post-smolt landanlegg') - bruk denne "
+                     "for å se NOS og landanlegget som ett system; 'Fiskeverditabell' for kjøp fra andre.",
             )
-            cfg_smolt_pris_modus = "Formel" if smolt_pris_modus.startswith("Formel") else "Tabell"
+            eget_anlegg_smolt = smolt_pris_modus.startswith("Eget")
+            cfg_smolt_pris_modus = "Tabell" if smolt_pris_modus.startswith("Fiskeverdi") else "Formel"
             # Default-verdier FØR forgreningen under, slik at BEGGE variablene
             # alltid finnes uansett hvilken modus som er valgt - de trengs
             # begge lenger ned i skriptet for å settes på selve cfg-objektet
@@ -1663,7 +2038,22 @@ with st.sidebar:
             smolt_price_base = float(default_config.SMOLT_PRICE_BASE_KR)
             smolt_price_per_gram = float(default_config.SMOLT_PRICE_PER_GRAM_KR)
 
-            if cfg_smolt_pris_modus == "Formel":
+            if eget_anlegg_smolt:
+                _ps_pris_def = _eget_anlegg_pris_default()
+                _ps_kilde = "satt i 'Post-smolt landanlegg' i denne økten" if "landanlegg_salgspris_kr_kg" in st.session_state else "standard fra config_postsmolt.py"
+                eget_pris_kr_kg = st.number_input("Implisitt startpris per kg fra eget anlegg (kr/kg WFE)", min_value=0.0, value=_ps_pris_def,
+                                                  step=1.0, format="%.1f", key="smolt_eget_pris_kr_kg",
+                                                  help="Fylles automatisk med salgsprisen fra visningen 'Post-smolt landanlegg' når du velger dette "
+                                                       "alternativet (prisen satt der i denne økten, ellers config-standard). Kan overstyres her.")
+                st.caption(f"Startpris hentet: {fmt_float(_ps_pris_def, 1)} kr/kg ({_ps_kilde}). Velg radioknappen på nytt for å hente oppdatert pris.")
+                smolt_price_base = 0.0
+                smolt_price_per_gram = eget_pris_kr_kg / 1000.0
+                computed_smolt_price = smolt_price_per_gram * start_weight_g
+                st.caption(f"→ {fmt_float(eget_pris_kr_kg, 1)} kr/kg × {fmt_float(start_weight_g, 0)} g = "
+                           f"**{fmt_float(computed_smolt_price, 2)} kr/stk** (fiskeverditabellen ville gitt "
+                           f"{fmt_float(interpoler_fiskeverdi_kr_per_kg(start_weight_g, default_config.SMOLT_VERDITABELL_KR_PER_KG) * start_weight_g / 1000.0, 2)} kr/stk)")
+                price_txt = str(computed_smolt_price)
+            elif cfg_smolt_pris_modus == "Formel":
                 st.caption("Formel: fastdel (kr) + sats (kr/gram) x smoltvekt")
                 fc, gc = st.columns(2)
                 smolt_price_base = fc.number_input(
@@ -1694,6 +2084,7 @@ with st.sidebar:
                     "egen smoltvekt. Rediger tabellen i config_1tank.py (SMOLT_VERDITABELL_KR_PER_KG) "
                     "hvis prisene endrer seg."
                 )
+                _tabell_pris_placeholder = st.empty()   # fylles etter at ledgeren er bygget (første 12 mnd)
                 # VIKTIG: beregnes og vises FØR den kollapsede "Vis fiskeverditabellen"-boksen under,
                 # slik at "hva har vi faktisk betalt" er synlig med det samme - ikke skjult bak en
                 # boks brukeren må åpne selv.
@@ -1807,7 +2198,7 @@ with st.sidebar:
         + [(sl["id"], sl["navn"]) for sl in hexacage_sublinjer if sl["id"] != "leie_132"]
         + [(fc["id"], fc["navn"]) for fc in default_config.FIXED_COSTS if fc["id"] != "leie_anlegg"]
     )
-    lonn_ider = {"annet_direkte_lonn", "indirekte_lonn", "leie_136", "leie_137"}
+    lonn_ider = {"annet_direkte_lonn", "indirekte_lonn", "leie_136", "leie_137"} | ({"prodlonn", "administrasjon"} if landanlegg else set())
     ingen_eskalering_ider = set()  # 13.1 Kapitalleie eskalerer nå også som default (2 %, se _default_sats())
 
     def _default_sats(id_: str) -> float:
@@ -1861,6 +2252,7 @@ with st.sidebar:
 # ----------------------------------------------------------------------
 # BYGG CONFIG-OBJEKT FOR DENNE KJØRINGEN
 # ----------------------------------------------------------------------
+
 class RunConfig:
     pass
 
@@ -1915,6 +2307,7 @@ if landanlegg:
     cfg.TRINN = ps_trinn
     cfg.FASE2_OVERGANG_G = int(ps_fase2_overgang_g)
     cfg.KAR_DELES_IKKE_MELLOM_KOHORTER = bool(default_config.KAR_DELES_IKKE_MELLOM_KOHORTER)
+    cfg.RESERVERTE_KAR = dict(_designs.get(st.session_state.get("ps_design", ""), {}).get("reservert", {})) if _designs else {}
 cfg.RESOURCES = [
     {**r, "faktor_per_kg_wfe": resource_factors[r["id"]]} if r["id"] in resource_factors else dict(r)
     for r in default_config.RESOURCES
@@ -1924,11 +2317,13 @@ if produkttype == "Postsmolt":
     # nullstiller faktoren (ikke bare prisen) slik at mengden også vises
     # som 0, uansett hva som står i sidepanelets faktor-/prisfelt for disse.
     for r in cfg.RESOURCES:
-        if r["id"] in ("slakt", "distribusjon"):
+        if r["id"] == "slakt" or (r["id"] == "distribusjon" and not landanlegg):
             r["faktor_per_kg_wfe"] = 0.0
 cfg.RESOURCE_PRICES_NOK = resource_prices
 cfg.WFE_FAKTOR = default_config.WFE_FAKTOR
 cfg.SALES_PRICE_KR_PER_KG = parse_number(salgspris_txt) if salgspris_txt.strip() else 0.0
+if landanlegg and salgspris_modus == "Fast pris (kr/kg)":
+    st.session_state["landanlegg_salgspris_kr_kg"] = float(cfg.SALES_PRICE_KR_PER_KG)   # hentes av "Eget post-smolt-anlegg" i SFaaS/Konsolidert
 cfg.SALGSPRIS_MODUS = salgspris_modus
 _sales_price_table_runtime = (
     default_config.SMOLT_VERDITABELL_KR_PER_KG if salgspris_modus == "Følger fiskeverditabellen" else None
@@ -1978,6 +2373,22 @@ complete_gens = generations  # alle kohorter her er allerede fullt simulert
 # vises der oppe, siden det krever hele vekstsimuleringen (RGI, sesong,
 # temperaturprofil osv.), som ikke er kjørt før nå.
 _solgt_enhet_preview = "HOG" if cfg.PRODUKTTYPE == "Slaktefisk" else "WFE"
+if "_tabell_pris_placeholder" in dir() and cfg_smolt_pris_modus == "Tabell" and not landanlegg:
+    # Implisitt smoltpris ved tabellvalget: faktisk bokført kr_smolt / stk over de
+    # første 12 månedene fra første innsett (inkl. eskalering), per stk og per kg.
+    _tp = ledger[ledger["mengde_smolt"] > 0].copy()
+    _tp["_dato"] = pd.to_datetime(_tp["dato"])
+    _t0 = _tp["_dato"].min()
+    _tp = _tp[_tp["_dato"] < _t0 + pd.DateOffset(months=12)]
+    _tp_stk = float(_tp["mengde_smolt"].sum()); _tp_kr = float(_tp["kr_smolt"].sum())
+    if _tp_stk > 0:
+        _tp_kr_stk = _tp_kr / _tp_stk
+        _tp_kg = float(sum(cfg.BATCH_START_WEIGHT_KG) / len(cfg.BATCH_START_WEIGHT_KG)) if len(cfg.BATCH_START_WEIGHT_KG) else float(cfg.START_WEIGHT_KG)
+        _tabell_pris_placeholder.markdown(
+            f"**Implisitt pris ved tabellvalget, første 12 måneder ({_t0.strftime('%b %Y')}–{(_t0 + pd.DateOffset(months=11)).strftime('%b %Y')}):** "
+            f"**{fmt_float(_tp_kr_stk / _tp_kg, 2)} kr/kg WFE** = {fmt_float(_tp_kr_stk, 2)} kr/stk ved {fmt_float(_tp_kg * 1000, 0)} g "
+            f"({fmt_int(_tp_stk)} stk kjøpt). Til sammenligning: eget anlegg {fmt_float(float(st.session_state.get('landanlegg_salgspris_kr_kg', getattr(postsmolt_config, 'POSTSMOLT_SALGSPRIS_KR_PER_KG', 100.0))), 1)} kr/kg."
+        )
 if landanlegg and oppskrift_resultat_placeholder:
     _k0 = next(iter(generations.values()))
     oppskrift_resultat_placeholder[0].caption(
@@ -2052,10 +2463,20 @@ if landanlegg:
             f"{r['Trinn']} {int(r['Maks kar i bruk'])}/{int(r['Kar'])} kar på topp ({r['Tetthet ved full utnyttelse, topp (kg/m3)']:.0f} kg/m³ ved full utnyttelse)"
             for _, r in _ts.iterrows()))
     st.subheader("Kapasitet per trinn (karpooler)")
-    st.dataframe(_ts, hide_index=True, use_container_width=True)
+    _ts_vis = _ts.copy()
+    for _c in ["Kar", "Karvolum (m3)", "Kapasitet (m3)", "Maks m3-behov", "Maks kar i bruk", "Ledige kar (min)", "Uker over kapasitet"]:
+        _ts_vis[_c] = _ts_vis[_c].apply(fmt_int)
+    for _c in ["Tetthetstak (kg/m3)", "Maks biomasse (t)", "Tetthet ved full utnyttelse, topp (kg/m3)"]:
+        _ts_vis[_c] = _ts_vis[_c].apply(lambda x: fmt_float(x, 1))
+    _ts_vis = _ts_vis.rename(columns={"Karvolum (m3)": "Karvolum (m³)", "Kapasitet (m3)": "Kapasitet (m³)",
+                                      "Tetthetstak (kg/m3)": "Tetthetstak (kg/m³)", "Maks m3-behov": "Maks m³-behov",
+                                      "Tetthet ved full utnyttelse, topp (kg/m3)": "Tetthet ved full utnyttelse, topp (kg/m³)"})
+    _render_table(_ts_vis.set_index("Trinn"))
     # Graf: kar i bruk per trinn per uke mot antall kar
     _kap = meta["kapasitet"]
-    _n_uker_vis = min(meta["n_weeks_total"], int(cfg.N_YEARS_TO_RUN) * 52 + 40)
+    # Vises for to år (nok til å se repetisjonen) - modellen simulerer fortsatt hele horisonten.
+    _n_uker_vis = min(meta["n_weeks_total"], 2 * 52 + 26)
+    st.caption("Grafen viser de to første årene fra første innsett; modellen kjører hele horisonten. Brun strek = stående biomasse (t), blå trapper = kar i bruk.")
     _uke_datoer = [monday_of_week(w, cfg.START_ISO_YEAR, cfg.START_ISO_WEEK) for w in range(_n_uker_vis)]
     _fig_k, _axes_k = plt.subplots(len(_kap), 1, figsize=(20, 3.2 * len(_kap)), sharex=True)
     if len(_kap) == 1:
@@ -2071,10 +2492,66 @@ if landanlegg:
         _ax.set_title(f"{_k['navn']} - {_k['antall_kar']} x {fmt_int(_k['kar_volum_m3'])} m³, tetthetstak {_k['tetthetstak_kg_m3']:.0f} kg/m³", loc="left")
         _ax.legend(loc="upper left", fontsize=9)
         _ax.grid(axis="y", alpha=0.3)
+    import matplotlib.dates as _md
+    _axes_k[-1].xaxis.set_major_locator(_md.MonthLocator(interval=2))
+    _axes_k[-1].xaxis.set_major_formatter(_md.DateFormatter("%b %y"))
+    for _lbl in _axes_k[-1].get_xticklabels():
+        _lbl.set_rotation(45); _lbl.set_ha("right")
     _fig_k.tight_layout()
     st.pyplot(_fig_k, use_container_width=True)
     plt.close(_fig_k)
     m3_pool = meta["m3_pool"]
+
+    # ---- TANKPLAN: hvilke kar, når - og tegning av anlegget måned for måned ----
+    st.subheader("Tankplan – hvilke kar hver kohort står i, og når")
+    st.caption("Karene tildeles etter laveste ledige nummer, ett kar per kohort (biosikkerhet), og et kar må være ledig i "
+               "hele perioden kohorten trenger det i trinnet. Vaskeuken etter levering holder karene opptatt. "
+               "'FOR FÅ KAR' i tabellen betyr at trinnet er overbooket den uken.")
+    _tanks, _moves, _uke_dato = tildel_kar(cfg, generations, cohorts, meta)
+    _tankplan = kohortplan_tabell(cfg, generations, cohorts, meta, _tanks, _moves, _uke_dato)
+    _koh_alle = [gid for gid, _ in sorted(generations.items(), key=lambda kv: kv[1]["start_week"])]
+    with st.expander("📋 Flytteplan per kohort - innsett, flytting, splitting, levering (klikk for å vise)", expanded=False):
+        _koh_valg = st.selectbox("Vis flytteplan for:", options=["Alle kohorter"] + _koh_alle, index=0, key="tankplan_kohort")
+        _vis = _tankplan if _koh_valg == "Alle kohorter" else _tankplan[_tankplan["Kohort"] == _koh_valg]
+        _vis = _vis.copy()
+        _vis["Dato"] = pd.to_datetime(_vis["Dato"]).dt.strftime("%d.%m.%Y")
+        _vis["Vekt (g)"] = _vis["Vekt (g)"].apply(fmt_int)
+        _vis["Biomasse (t)"] = _vis["Biomasse (t)"].apply(lambda x: fmt_float(x, 1))
+        st.dataframe(_vis, hide_index=True, use_container_width=True, height=min(600, 38 + 35 * len(_vis)))
+    with st.expander("🖼️ Anlegget måned for måned – alle kohorter (tilsvarer kakestykkene i Big Dipper-visningen)", expanded=True):
+        _n_mnd = int(st.number_input("Antall måneder å vise", min_value=6, max_value=48, value=24, step=6, key="tankplan_n_mnd"))
+        _fig_m = tegn_anlegg_maanedlig(cfg, generations, cohorts, meta, _tanks, _uke_dato, n_maaneder=_n_mnd)
+        st.pyplot(_fig_m, use_container_width=True)
+        _buf_m = io.BytesIO()
+        _fig_m.savefig(_buf_m, format="png", dpi=130, bbox_inches="tight")
+        st.download_button("Last ned månedsoversikten (PNG)", data=_buf_m.getvalue(), file_name="anlegg_maaned_for_maaned.png", mime="image/png")
+        plt.close(_fig_m)
+    _da = next((d for k, d in _designs.items() if "I.A" in k), None) if _designs else None
+    _db = next((d for k, d in _designs.items() if "I.B" in k), None) if _designs else None
+    if _da and _db:
+        st.subheader("Anleggskart – Fase I.A med utvidelse til Fase I.B")
+        st.caption("Lyse kar bygges i Fase I.A (én ABD). Svarte kar er utvidelsen i Fase I.B – samme yngel- og smolthall, "
+                   "10 post-smolt-kar til, og kapasiteten dobles til to ABD-er.")
+        _fig_a = tegn_anleggskart(_da, _db)
+        st.pyplot(_fig_a, use_container_width=True)
+        _buf_a = io.BytesIO()
+        _fig_a.savefig(_buf_a, format="png", dpi=130, bbox_inches="tight")
+        st.download_button("Last ned anleggskartet (PNG)", data=_buf_a.getvalue(), file_name="anleggskart_fase_IA_IB.png", mime="image/png")
+        plt.close(_fig_a)
+    with st.expander("🖼️ Tegning: valgte kohorter fulgt fra innsett til levering", expanded=False):
+        _std = _koh_alle[:3]
+        _koh_tegn = st.multiselect("Kohorter å fargelegge (maks 8, andre vises grå)", options=_koh_alle, default=_std,
+                                   max_selections=8, key="tankplan_tegn_kohorter")
+        if _koh_tegn:
+            _fig_t = tegn_tankbruk(cfg, generations, cohorts, meta, _tanks, _uke_dato, _koh_tegn)
+            st.pyplot(_fig_t, use_container_width=True)
+            _buf = io.BytesIO()
+            _fig_t.savefig(_buf, format="png", dpi=130, bbox_inches="tight")
+            st.download_button("Last ned tegningen (PNG)", data=_buf.getvalue(),
+                               file_name=f"tankbruk_{'_'.join(k.replace('-', '') for k in _koh_tegn)}.png", mime="image/png")
+            plt.close(_fig_t)
+    _csv = _tankplan.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
+    st.download_button("Last ned hele tankplanen (CSV)", data=_csv, file_name="tankplan_postsmolt.csv", mime="text/csv")
 elif n_tanker_aktiv > 1 and cfg.SKOTT_FASTE:
     # ---- FASTE SKOTT: tetthetstaket gjelder PER TANK (fast volum) ----
     n_over_tak = sum(1 for info in complete_gens.values() if info.get("tetthet_over_tak"))
@@ -2153,13 +2630,15 @@ for yr in forste_tre_ar:
         snittvekt_wfe_g = (levert_kg_ar / antall_ar * 1000) if antall_ar else 0.0
         snittvekt_g = snittvekt_wfe_g * cfg.HOG_FAKTOR
         tonn_levert_hog = tonn_levert * cfg.HOG_FAKTOR
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         c1.metric("1) Tonn inn", f"{fmt_int(tonn_inn)} t")
         c2.metric("2) Netto tilvekst", f"{fmt_int(netto_tilvekst)} t")
-        c3.metric("3) Tonn levert (WFE)", f"{fmt_int(tonn_levert)} t")
-        c4.metric("Tonn levert (HOG)", f"{fmt_int(tonn_levert_hog)} t")
-        c5.metric("Snittvekt levert (WFE)", f"{fmt_float(snittvekt_wfe_g, 0)} g")
-        c6.metric("Snittvekt levert (HOG)", f"{fmt_float(snittvekt_g, 0)} g")
+        c3.metric("3) Inn + tilvekst (WFE)", f"{fmt_int(tonn_levert)} t",
+                  help="Smolt inn + netto tilvekst fra vekstkurven. Overstiger solgt volum fordi kurven fortsetter å tilskrive vekst i slaktevinduet etter at de første batchene er solgt.")
+        c4.metric("Solgt (WFE, batcher)", f"{fmt_int(levert_kg_ar / 1000)} t", help="Faktisk levert i batchene dette året - grunnlaget for inntekt og P&L.")
+        c5.metric("Solgt (HOG, batcher)", f"{fmt_int(levert_kg_ar / 1000 * cfg.HOG_FAKTOR)} t")
+        c6.metric("Snittvekt levert (WFE)", f"{fmt_float(snittvekt_wfe_g, 0)} g")
+        c7.metric("Snittvekt levert (HOG)", f"{fmt_float(snittvekt_g, 0)} g")
         continue
 
     # Postsmolt (2x/3x/4x): splittet PER OPPSKRIFT - IKKE ett blandet snitt
@@ -2321,77 +2800,77 @@ cashflow = build_cashflow_ledger(
     seasonal_index_by_week=seasonal_index_runtime, sales_price_table=_sales_price_table_runtime,
 )
 
-st.subheader("Kohort-sammendrag")
-rows = []
-for gid, info in complete_gens.items():
-    lbl_start, _ = week_label(info["start_week"], cfg.START_ISO_YEAR, cfg.START_ISO_WEEK)
-    lbl_delivery, d_delivery = week_label(info["delivery_week"], cfg.START_ISO_YEAR, cfg.START_ISO_WEEK)
-    # Salgspris VED LEVERING - hentet direkte fra cashflow (samme tall som
-    # faktisk brukes i Kontantstrøm/Resultatregnskap, ikke en duplisert
-    # beregning) - summert over ALLE batchene i denne kohorten (relevant
-    # for Slaktefisk sine 8 batcher per kohort; for postsmolt med
-    # salgsvindu=1 uke er det uansett bare én batch).
-    _kohort_inntekt = cashflow.loc[cashflow["kohort_id"] == gid, "inntekt_kr"].sum()
-    _kohort_kg_solgt = cashflow.loc[cashflow["kohort_id"] == gid, "kg_solgt"].sum()
-    # Antall/tonn levert og snittvekt = SUM OVER BATCHENE (det som faktisk
-    # selges uke for uke i salgsvinduet) - IKKE "hele bestanden ved siste
-    # vekstuke" (info["delivered_biomass_kg"]), som overvurderer både tonn
-    # og vekt fordi 7 av 8 batcher selges FØR siste uke. Samme tall som
-    # kontantstrøm, månedstabellen under og grafene bruker.
-    _antall_levert = round(sum(b["delivered_count"] for b in info["batches"]))
-    _levert_kg = sum(b["delivered_biomass_kg"] for b in info["batches"])
-    _snittvekt_levert_g = _levert_kg / _antall_levert * 1000 if _antall_levert else 0.0
-    _salgspris_kr_kg = _kohort_inntekt / _kohort_kg_solgt if _kohort_kg_solgt else 0.0
-    _salgspris_kr_stk = _kohort_inntekt / _antall_levert if _antall_levert else 0.0
-    rows.append({
-        "Kohort": gid, gruppe_navn: info["batch"], "År (levering)": d_delivery.isocalendar()[0],
-        "Innsett (uke)": lbl_start, "Levering (uke)": lbl_delivery,
-        "Vekst-uker": info["growth_weeks"], "Vask-uker": info["cleaning_weeks"],
-        "Smoltvekt inn (g)": round(info.get("start_weight_kg", cfg.START_WEIGHT_KG) * 1000, 1),
-        "Smoltantall": info["stocked"],
-        "Antall levert (stk)": _antall_levert,
-        "Snittvekt levert (g WFE)": round(_snittvekt_levert_g),
-        "Snittvekt levert (g HOG)": round(_snittvekt_levert_g * cfg.HOG_FAKTOR),
-        "Leveringsvekt (g)": round(info["delivery_weight_kg"] * 1000),
-        "Salgspris ved levering (kr/kg)": round(_salgspris_kr_kg, 2),
-        "Salgspris ved levering (kr/stk)": round(_salgspris_kr_stk, 2),
-        "Bruttovekst (kg WFE)": round(info["total_gross_growth_kg"], 1),
-        "Levert (t WFE)": round(_levert_kg / 1000, 1),
-        "Levert (t HOG)": round(_levert_kg * cfg.HOG_FAKTOR / 1000, 1),
-        # FCR = fôr / tilvekst. WFE-versjonen er den biologiske (fôr per kg
-        # levende tilvekst). HOG-versjonen måler samme fôr mot SELLBAR
-        # tilvekst (x HOG-faktor) - alltid høyere, siden hode/innvoller
-        # ikke selges. Samme prinsipp som i konsolidert kontantstrøm.
-        "FCR (WFE)": round(info["overall_fcr"], 2),
-        "FCR (HOG)": round(info["overall_fcr"] / cfg.HOG_FAKTOR, 2) if cfg.HOG_FAKTOR else None,
-        **({"Maks m³-behov (ved tak)": round(info["max_m3_behov"])} if (n_tanker_aktiv > 1 and not cfg.SKOTT_FASTE) else {
-            "Maks tetthet (kg/m³)": round(info["max_density_kg_m3"], 1),
-            "Over tak?": "Ja" if info.get("tetthet_over_tak") else "",
-        }),
-    })
-cohort_df = pd.DataFrame(rows)
-cohort_df_display = cohort_df.copy()
-cohort_df_display["Smoltantall"] = cohort_df_display["Smoltantall"].apply(fmt_int)
-cohort_df_display["Antall levert (stk)"] = cohort_df_display["Antall levert (stk)"].apply(fmt_int)
-cohort_df_display["Leveringsvekt (g)"] = cohort_df_display["Leveringsvekt (g)"].apply(fmt_int)
-cohort_df_display["Snittvekt levert (g WFE)"] = cohort_df_display["Snittvekt levert (g WFE)"].apply(fmt_int)
-cohort_df_display["Snittvekt levert (g HOG)"] = cohort_df_display["Snittvekt levert (g HOG)"].apply(fmt_int)
-cohort_df_display = cohort_df_display.rename(columns={"Leveringsvekt (g)": "Vekt siste batch (g WFE)"})
-cohort_df_display["Salgspris ved levering (kr/kg)"] = cohort_df_display["Salgspris ved levering (kr/kg)"].apply(lambda x: fmt_float(x, 2))
-cohort_df_display["Salgspris ved levering (kr/stk)"] = cohort_df_display["Salgspris ved levering (kr/stk)"].apply(lambda x: fmt_float(x, 2))
-cohort_df_display["Bruttovekst (kg WFE)"] = cohort_df_display["Bruttovekst (kg WFE)"].apply(lambda x: fmt_float(x, 1))
-cohort_df_display["Smoltvekt inn (g)"] = cohort_df_display["Smoltvekt inn (g)"].apply(lambda x: fmt_float(x, 1))
-cohort_df_display["Levert (t WFE)"] = cohort_df_display["Levert (t WFE)"].apply(lambda x: fmt_float(x, 1))
-cohort_df_display["Levert (t HOG)"] = cohort_df_display["Levert (t HOG)"].apply(lambda x: fmt_float(x, 1))
-cohort_df_display["FCR (WFE)"] = cohort_df_display["FCR (WFE)"].apply(lambda x: fmt_float(x, 2))
-cohort_df_display["FCR (HOG)"] = cohort_df_display["FCR (HOG)"].apply(lambda x: fmt_float(x, 2) if x is not None else "")
-if "Maks tetthet (kg/m³)" in cohort_df_display.columns:
-    cohort_df_display["Maks tetthet (kg/m³)"] = cohort_df_display["Maks tetthet (kg/m³)"].apply(lambda x: fmt_float(x, 1))
-if "Maks m³-behov (ved tak)" in cohort_df_display.columns:
-    cohort_df_display["Maks m³-behov (ved tak)"] = cohort_df_display["Maks m³-behov (ved tak)"].apply(fmt_int)
-cohort_df_wide = cohort_df_display.set_index("Kohort").T
-cohort_df_wide.index.name = "Felt"
-_render_table(cohort_df_wide)
+with st.expander("📋 Kohort-sammendrag (klikk for å vise)", expanded=False):
+    rows = []
+    for gid, info in complete_gens.items():
+        lbl_start, _ = week_label(info["start_week"], cfg.START_ISO_YEAR, cfg.START_ISO_WEEK)
+        lbl_delivery, d_delivery = week_label(info["delivery_week"], cfg.START_ISO_YEAR, cfg.START_ISO_WEEK)
+        # Salgspris VED LEVERING - hentet direkte fra cashflow (samme tall som
+        # faktisk brukes i Kontantstrøm/Resultatregnskap, ikke en duplisert
+        # beregning) - summert over ALLE batchene i denne kohorten (relevant
+        # for Slaktefisk sine 8 batcher per kohort; for postsmolt med
+        # salgsvindu=1 uke er det uansett bare én batch).
+        _kohort_inntekt = cashflow.loc[cashflow["kohort_id"] == gid, "inntekt_kr"].sum()
+        _kohort_kg_solgt = cashflow.loc[cashflow["kohort_id"] == gid, "kg_solgt"].sum()
+        # Antall/tonn levert og snittvekt = SUM OVER BATCHENE (det som faktisk
+        # selges uke for uke i salgsvinduet) - IKKE "hele bestanden ved siste
+        # vekstuke" (info["delivered_biomass_kg"]), som overvurderer både tonn
+        # og vekt fordi 7 av 8 batcher selges FØR siste uke. Samme tall som
+        # kontantstrøm, månedstabellen under og grafene bruker.
+        _antall_levert = round(sum(b["delivered_count"] for b in info["batches"]))
+        _levert_kg = sum(b["delivered_biomass_kg"] for b in info["batches"])
+        _snittvekt_levert_g = _levert_kg / _antall_levert * 1000 if _antall_levert else 0.0
+        _salgspris_kr_kg = _kohort_inntekt / _kohort_kg_solgt if _kohort_kg_solgt else 0.0
+        _salgspris_kr_stk = _kohort_inntekt / _antall_levert if _antall_levert else 0.0
+        rows.append({
+            "Kohort": gid, gruppe_navn: info["batch"], "År (levering)": d_delivery.isocalendar()[0],
+            "Innsett (uke)": lbl_start, "Levering (uke)": lbl_delivery,
+            "Vekst-uker": info["growth_weeks"], "Vask-uker": info["cleaning_weeks"],
+            "Smoltvekt inn (g)": round(info.get("start_weight_kg", cfg.START_WEIGHT_KG) * 1000, 1),
+            "Smoltantall": info["stocked"],
+            "Antall levert (stk)": _antall_levert,
+            "Snittvekt levert (g WFE)": round(_snittvekt_levert_g),
+            "Snittvekt levert (g HOG)": round(_snittvekt_levert_g * cfg.HOG_FAKTOR),
+            "Leveringsvekt (g)": round(info["delivery_weight_kg"] * 1000),
+            "Salgspris ved levering (kr/kg)": round(_salgspris_kr_kg, 2),
+            "Salgspris ved levering (kr/stk)": round(_salgspris_kr_stk, 2),
+            "Bruttovekst (kg WFE)": round(info["total_gross_growth_kg"], 1),
+            "Levert (t WFE)": round(_levert_kg / 1000, 1),
+            "Levert (t HOG)": round(_levert_kg * cfg.HOG_FAKTOR / 1000, 1),
+            # FCR = fôr / tilvekst. WFE-versjonen er den biologiske (fôr per kg
+            # levende tilvekst). HOG-versjonen måler samme fôr mot SELLBAR
+            # tilvekst (x HOG-faktor) - alltid høyere, siden hode/innvoller
+            # ikke selges. Samme prinsipp som i konsolidert kontantstrøm.
+            "FCR (WFE)": round(info["overall_fcr"], 2),
+            "FCR (HOG)": round(info["overall_fcr"] / cfg.HOG_FAKTOR, 2) if cfg.HOG_FAKTOR else None,
+            **({"Maks m³-behov (ved tak)": round(info["max_m3_behov"])} if (n_tanker_aktiv > 1 and not cfg.SKOTT_FASTE) else {
+                "Maks tetthet (kg/m³)": round(info["max_density_kg_m3"], 1),
+                "Over tak?": "Ja" if info.get("tetthet_over_tak") else "",
+            }),
+        })
+    cohort_df = pd.DataFrame(rows)
+    cohort_df_display = cohort_df.copy()
+    cohort_df_display["Smoltantall"] = cohort_df_display["Smoltantall"].apply(fmt_int)
+    cohort_df_display["Antall levert (stk)"] = cohort_df_display["Antall levert (stk)"].apply(fmt_int)
+    cohort_df_display["Leveringsvekt (g)"] = cohort_df_display["Leveringsvekt (g)"].apply(fmt_int)
+    cohort_df_display["Snittvekt levert (g WFE)"] = cohort_df_display["Snittvekt levert (g WFE)"].apply(fmt_int)
+    cohort_df_display["Snittvekt levert (g HOG)"] = cohort_df_display["Snittvekt levert (g HOG)"].apply(fmt_int)
+    cohort_df_display = cohort_df_display.rename(columns={"Leveringsvekt (g)": "Vekt siste batch (g WFE)"})
+    cohort_df_display["Salgspris ved levering (kr/kg)"] = cohort_df_display["Salgspris ved levering (kr/kg)"].apply(lambda x: fmt_float(x, 2))
+    cohort_df_display["Salgspris ved levering (kr/stk)"] = cohort_df_display["Salgspris ved levering (kr/stk)"].apply(lambda x: fmt_float(x, 2))
+    cohort_df_display["Bruttovekst (kg WFE)"] = cohort_df_display["Bruttovekst (kg WFE)"].apply(lambda x: fmt_float(x, 1))
+    cohort_df_display["Smoltvekt inn (g)"] = cohort_df_display["Smoltvekt inn (g)"].apply(lambda x: fmt_float(x, 1))
+    cohort_df_display["Levert (t WFE)"] = cohort_df_display["Levert (t WFE)"].apply(lambda x: fmt_float(x, 1))
+    cohort_df_display["Levert (t HOG)"] = cohort_df_display["Levert (t HOG)"].apply(lambda x: fmt_float(x, 1))
+    cohort_df_display["FCR (WFE)"] = cohort_df_display["FCR (WFE)"].apply(lambda x: fmt_float(x, 2))
+    cohort_df_display["FCR (HOG)"] = cohort_df_display["FCR (HOG)"].apply(lambda x: fmt_float(x, 2) if x is not None else "")
+    if "Maks tetthet (kg/m³)" in cohort_df_display.columns:
+        cohort_df_display["Maks tetthet (kg/m³)"] = cohort_df_display["Maks tetthet (kg/m³)"].apply(lambda x: fmt_float(x, 1))
+    if "Maks m³-behov (ved tak)" in cohort_df_display.columns:
+        cohort_df_display["Maks m³-behov (ved tak)"] = cohort_df_display["Maks m³-behov (ved tak)"].apply(fmt_int)
+    cohort_df_wide = cohort_df_display.set_index("Kohort").T
+    cohort_df_wide.index.name = "Felt"
+    _render_table(cohort_df_wide)
 
 # ----------------------------------------------------------------------
 # KOHORTUTVIKLING MÅNED FOR MÅNED - én kohort om gangen (G1-K1 ... ), 12
@@ -2401,63 +2880,63 @@ _render_table(cohort_df_wide)
 # (fôr, bruttovekst, levert) = sum i måneden. Årskolonnen: sum for flows,
 # MAKS i året for beholdning (høyeste tetthet/m3-behov det året).
 # ----------------------------------------------------------------------
-st.subheader("Kohortutvikling måned for måned")
-_kohort_utv_valg = st.selectbox(
-    "Velg kohort:", options=list(complete_gens.keys()), index=0, key="kohort_utvikling_valg",
-    help="G = generasjon (runde innsett i anlegget), K = kohort/utsett-nummer i runden (= tank).",
-)
-_ku_info = complete_gens[_kohort_utv_valg]
-_ku = ledger[ledger["kohort_id"] == _kohort_utv_valg].copy()
-_ku["_dato"] = pd.to_datetime(_ku["dato"])
-# År/måned bestemmes av ukens TORSDAG (ISO-konvensjonen): uke 1 i 2026
-# starter mandag 29.12.2025, og skal telle som januar 2026 - ikke gi en
-# egen, nesten tom "2025"-blokk.
-_ku["_ar"] = (_ku["_dato"] + pd.Timedelta(days=3)).dt.year
-_ku["_mnd"] = (_ku["_dato"] + pd.Timedelta(days=3)).dt.month
-_ku = _ku.sort_values("_dato")
-_ku["m3_brukt"] = _ku["biomasse_kg"] / cfg.MAX_DENSITY_KG_M3       # m3 som trengs ved tetthetstaket
-_ku["pct_av_tank"] = _ku["m3_brukt"] / cfg.TANK_VOLUME_M3 * 100
-_ku["tetthet"] = _ku["biomasse_kg"] / cfg.TANK_VOLUME_M3
-_beholdning = {  # kolonne -> (radnavn, desimaler)
-    "biomasse_kg": ("Stående biomasse (t)", 1), "antall_fisk": ("Antall fisk (stk)", 0),
-    "vekt_g": ("Snittvekt (g)", 0), "tetthet": ("Tetthet (kg/m³)", 1),
-    "m3_brukt": (f"m³-behov (ved {fmt_int(cfg.MAX_DENSITY_KG_M3)} kg/m³)", 0),
-    "pct_av_tank": (f"% av anleggets {fmt_int(meta.get('m3_pool', cfg.TANK_VOLUME_M3))} m³", 1),
-}
-_m3_ref = meta.get("m3_pool", cfg.TANK_VOLUME_M3)
-_ku["pct_av_tank"] = _ku["m3_brukt"] / _m3_ref * 100
-_flow = {
-    "mengde_for": ("Fôr (t)", 1), "kg_wfe_brutto": ("Bruttovekst (t WFE)", 1),
-    "kg_wfe_levert": ("Levert (t WFE)", 1),
-}
-_mnd_navn = ["Jan", "Feb", "Mar", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Des"]
-st.caption(
-    f"{_kohort_utv_valg}: innsett {week_label(_ku_info['start_week'], cfg.START_ISO_YEAR, cfg.START_ISO_WEEK)[0]}, "
-    f"levering {week_label(_ku_info['delivery_week'], cfg.START_ISO_YEAR, cfg.START_ISO_WEEK)[0]}. "
-    "Beholdningsrader = verdi ved månedens slutt (årskolonnen viser MAKS i året); fôr/vekst/levert = sum "
-    "i måneden (årskolonnen = sum). 'm³-behov' = biomassen delt på tetthetstaket, dvs. det volumet "
-    "kakestykket må ha for at kohorten skal ligge på taket - veggene flyttes deretter."
-)
-for _ar in sorted(_ku["_ar"].unique()):
-    _ku_ar = _ku[_ku["_ar"] == _ar]
-    _kol = [f"{m} {_ar}" for m in _mnd_navn] + [f"Hele {_ar}"]
-    _rader = {}
-    for kol, (navn, dec) in _beholdning.items():
-        _slutt = _ku_ar.groupby("_mnd")[kol].last()
-        _vals = [(_slutt[m] / (1000 if kol == "biomasse_kg" else 1)) if m in _slutt.index else None for m in range(1, 13)]
-        _maks = max(v for v in _vals if v is not None) if any(v is not None for v in _vals) else None
-        _rader[navn] = [fmt_float(v, dec) if v is not None else "" for v in _vals] + [fmt_float(_maks, dec) if _maks is not None else ""]
-    for kol, (navn, dec) in _flow.items():
-        _sum = _ku_ar.groupby("_mnd")[kol].sum() / 1000.0
-        _vals = [_sum[m] if m in _sum.index else None for m in range(1, 13)]
-        _tot = sum(v for v in _vals if v is not None)
-        _rader[navn] = [fmt_float(v, dec) if v is not None and v != 0 else "" for v in _vals] + [fmt_float(_tot, dec)]
-    _ku_wide = pd.DataFrame(_rader, index=_kol).T
-    _ku_wide.index.name = "Felt"
-    st.markdown(f"**{_ar}**")
-    _render_table(_ku_wide, highlight_groups=[
-        {"rows": [_beholdning["m3_brukt"][0], _beholdning["pct_av_tank"][0]], "bg": "#eef1f6", "text": "#5b6b82"},
-    ])
+with st.expander("📋 Kohortutvikling måned for måned (klikk for å vise)", expanded=False):
+    _kohort_utv_valg = st.selectbox(
+        "Velg kohort:", options=list(complete_gens.keys()), index=0, key="kohort_utvikling_valg",
+        help="G = generasjon (runde innsett i anlegget), K = kohort/utsett-nummer i runden (= tank).",
+    )
+    _ku_info = complete_gens[_kohort_utv_valg]
+    _ku = ledger[ledger["kohort_id"] == _kohort_utv_valg].copy()
+    _ku["_dato"] = pd.to_datetime(_ku["dato"])
+    # År/måned bestemmes av ukens TORSDAG (ISO-konvensjonen): uke 1 i 2026
+    # starter mandag 29.12.2025, og skal telle som januar 2026 - ikke gi en
+    # egen, nesten tom "2025"-blokk.
+    _ku["_ar"] = (_ku["_dato"] + pd.Timedelta(days=3)).dt.year
+    _ku["_mnd"] = (_ku["_dato"] + pd.Timedelta(days=3)).dt.month
+    _ku = _ku.sort_values("_dato")
+    _ku["m3_brukt"] = _ku["biomasse_kg"] / cfg.MAX_DENSITY_KG_M3       # m3 som trengs ved tetthetstaket
+    _ku["pct_av_tank"] = _ku["m3_brukt"] / cfg.TANK_VOLUME_M3 * 100
+    _ku["tetthet"] = _ku["biomasse_kg"] / cfg.TANK_VOLUME_M3
+    _beholdning = {  # kolonne -> (radnavn, desimaler)
+        "biomasse_kg": ("Stående biomasse (t)", 1), "antall_fisk": ("Antall fisk (stk)", 0),
+        "vekt_g": ("Snittvekt (g)", 0), **({} if landanlegg else {"tetthet": ("Tetthet (kg/m³)", 1)}),
+        "m3_brukt": (f"m³-behov (ved {fmt_int(cfg.MAX_DENSITY_KG_M3)} kg/m³)", 0),
+        "pct_av_tank": (f"% av anleggets {fmt_int(meta.get('m3_pool', cfg.TANK_VOLUME_M3))} m³", 1),
+    }
+    _m3_ref = meta.get("m3_pool", cfg.TANK_VOLUME_M3)
+    _ku["pct_av_tank"] = _ku["m3_brukt"] / _m3_ref * 100
+    _flow = {
+        "mengde_for": ("Fôr (t)", 1), "kg_wfe_brutto": ("Bruttovekst (t WFE)", 1),
+        "kg_wfe_levert": ("Levert (t WFE)", 1),
+    }
+    _mnd_navn = ["Jan", "Feb", "Mar", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Des"]
+    st.caption(
+        f"{_kohort_utv_valg}: innsett {week_label(_ku_info['start_week'], cfg.START_ISO_YEAR, cfg.START_ISO_WEEK)[0]}, "
+        f"levering {week_label(_ku_info['delivery_week'], cfg.START_ISO_YEAR, cfg.START_ISO_WEEK)[0]}. "
+        "Beholdningsrader = verdi ved månedens slutt (årskolonnen viser MAKS i året); fôr/vekst/levert = sum "
+        "i måneden (årskolonnen = sum). 'm³-behov' = biomassen delt på tetthetstaket, dvs. det volumet "
+        "kakestykket må ha for at kohorten skal ligge på taket - veggene flyttes deretter."
+    )
+    for _ar in sorted(_ku["_ar"].unique()):
+        _ku_ar = _ku[_ku["_ar"] == _ar]
+        _kol = [f"{m} {_ar}" for m in _mnd_navn] + [f"Hele {_ar}"]
+        _rader = {}
+        for kol, (navn, dec) in _beholdning.items():
+            _slutt = _ku_ar.groupby("_mnd")[kol].last()
+            _vals = [(_slutt[m] / (1000 if kol == "biomasse_kg" else 1)) if m in _slutt.index else None for m in range(1, 13)]
+            _maks = max(v for v in _vals if v is not None) if any(v is not None for v in _vals) else None
+            _rader[navn] = [fmt_float(v, dec) if v is not None else "" for v in _vals] + [fmt_float(_maks, dec) if _maks is not None else ""]
+        for kol, (navn, dec) in _flow.items():
+            _sum = _ku_ar.groupby("_mnd")[kol].sum() / 1000.0
+            _vals = [_sum[m] if m in _sum.index else None for m in range(1, 13)]
+            _tot = sum(v for v in _vals if v is not None)
+            _rader[navn] = [fmt_float(v, dec) if v is not None and v != 0 else "" for v in _vals] + [fmt_float(_tot, dec)]
+        _ku_wide = pd.DataFrame(_rader, index=_kol).T
+        _ku_wide.index.name = "Felt"
+        st.markdown(f"**{_ar}**")
+        _render_table(_ku_wide, highlight_groups=[
+            {"rows": [_beholdning["m3_brukt"][0], _beholdning["pct_av_tank"][0]], "bg": "#eef1f6", "text": "#5b6b82"},
+        ])
 
 # ----------------------------------------------------------------------
 # KUBIKKBRUK I ANLEGGET - fleksible kakestykker: m³-behov per kohort
@@ -2836,570 +3315,570 @@ if konsolidert:
 else:
     cfg.EIER_UKE = None
 
-st.subheader("Kontantstrøm")
-if not cfg.SALES_PRICE_KR_PER_KG and not _sales_price_table_runtime:
-    st.caption("Ingen salgspris satt i sidepanelet ennå (under 'Salg') - inntektsraden viser 0 inntil den er fylt inn.")
-st.caption("Kostnadene er splittet opp i komponentene 0-12, samme linjer som i ressursregnskapet over.")
+with st.expander("💰 Kontantstrøm per uke / kohort / batch (klikk for å vise)", expanded=False):
+    if not cfg.SALES_PRICE_KR_PER_KG and not _sales_price_table_runtime:
+        st.caption("Ingen salgspris satt i sidepanelet ennå (under 'Salg') - inntektsraden viser 0 inntil den er fylt inn.")
+    st.caption("Kostnadene er splittet opp i komponentene 0-12, samme linjer som i ressursregnskapet over.")
 
 
-def _cf_row_labels(cfg):
-    solgt_enhet = "HOG" if cfg.PRODUKTTYPE == "Slaktefisk" else "WFE"
-    labels = {"kohort_id": "Kohort", "batch_id": "Batch", "dato": "Dato", "fase": "Fase", "inntekt_kr": "Inntekt (kr)"}
-    for r in cfg.RESOURCES:
-        labels[f"kr_{r['id']}"] = f"{r['navn']} (kr)"
-    labels.update({
-        "kostnad_totalt_kr": "Kostnad totalt (kr)",
-        "netto_kontantstrom_kr": "Netto kontantstrøm (kr)",
-        "akkumulert_kontantstrom_kr": "Akkumulert kontantstrøm (kr)",
-        "kg_wfe_brutto": "Bruttovekst i perioden (kg WFE) - grunnlag for kostnadslinjene",
-        "kg_wfe_levert": "Levert kunde, denne perioden (kg WFE)",
-        "kg_wfe_netto_akkumulert": "Netto tilvekst - levert minus innkjøpt (kg WFE)",
-        "kg_wfe_levert_akkumulert": "Levert kunde, akkumulert (kg WFE)",
-        "kg_solgt": f"Solgt vekt, denne perioden (kg {solgt_enhet})",
-        "kg_solgt_akkumulert": f"Solgt vekt, akkumulert (kg {solgt_enhet})",
-    })
-    return labels
-
-
-def _show_cashflow_table(df, period_col, period_labels=None):
-    wide = _transpose_for_display(df, period_col, period_labels=period_labels)
-    wide = wide.rename(index=_cf_row_labels(cfg))
-    _render_table(wide)
-
-
-def _per_kg_row_labels(cfg):
-    """Radnavnene har IKKE lenger 'WFE'/'HOG' hardkodet - enheten står i
-    kolonneoverskriften i stedet (f.eks. 'Totalt (WFE)' / 'Totalt (HOG)'),
-    så samme radnavn brukes uansett hvilken kolonne man ser på."""
-    labels = {"kohort_id": "Kohort", "batch_id": "Batch", "dato": "Dato", "fase": "Fase",
-              "kg_wfe_brutto_ref": "Bruttovekst, grunnlag kostnadslinjer (kg)",
-              "kg_levert_ref": "Levert biomasse (kunde), kg",
-              "kg_netto_ref": "Netto tilvekst - levert minus innkjøpt (kg)",
-              "inntekt_kr": "Inntekt (kr/kg)"}
-    for r in cfg.RESOURCES:
-        labels[f"kr_{r['id']}"] = f"{r['navn']} (kr/kg)"
-    labels.update({
-        "kostnad_totalt_kr": "Kostnad totalt (kr/kg)",
-        "netto_kontantstrom_kr": "Netto kontantstrøm (kr/kg)",
-        "akkumulert_kontantstrom_kr": "Akkumulert kontantstrøm (kr/kg)",
-    })
-    return labels
-
-
-def _build_per_kg_wide(df, period_col, period_labels=None,
-                        revenue_denom_col="kg_wfe_levert", cum_denom_col="kg_wfe_levert_akkumulert",
-                        cost_hog_faktor=1.0, apply_labels=True):
-    per_kg = build_per_kg(df, revenue_denom_col=revenue_denom_col, cum_denom_col=cum_denom_col,
-                           cost_hog_faktor=cost_hog_faktor)
-
-    # TRE referanserader settes tilbake inn ØVERST, UDELT (i kg, ikke kr/kg):
-    #   1) Bruttovekst - nevneren bak kostnadslinjene (x cost_hog_faktor,
-    #      slik at HOG-kolonnen viser SIN egen faktiske nevner, ikke samme
-    #      rå WFE-tall som WFE-kolonnen).
-    #   2) Levert biomasse (kunde) - nevneren bak inntekt/netto/akkumulert
-    #      (revenue_denom_col er allerede riktig valgt av kalleren: ren
-    #      kg_wfe_levert for WFE-kolonnen, kg_solgt for HOG-kolonnen).
-    #   3) Netto tilvekst (levert MINUS innkjøpt smoltbiomasse) - samme
-    #      skalering som bruttovekst (x cost_hog_faktor), slik at man ser
-    #      levert, netto tilvekst OG brutto (kostnadsrelevant) side om side.
-    ref_cols = []
-    if "kg_wfe_brutto" in df.columns:
-        per_kg.insert(0, "kg_wfe_brutto_ref", df["kg_wfe_brutto"].to_numpy() * cost_hog_faktor)
-        ref_cols.append("kg_wfe_brutto_ref")
-    if revenue_denom_col in df.columns:
-        per_kg.insert(1, "kg_levert_ref", df[revenue_denom_col].to_numpy())
-        ref_cols.append("kg_levert_ref")
-    if "kg_wfe_netto_akkumulert" in df.columns:
-        per_kg.insert(2, "kg_netto_ref", df["kg_wfe_netto_akkumulert"].to_numpy() * cost_hog_faktor)
-        ref_cols.append("kg_netto_ref")
-
-    id_cols = ("kohort_id", "batch_id", "uke", "dato", "fase", "periode")
-    kr_per_kg_cols = [c for c in per_kg.columns if c not in id_cols and c not in ref_cols]
-
-    formatted = with_thousands(per_kg, int_cols=[], float_cols=kr_per_kg_cols, float_decimals=2)
-    if ref_cols:
-        formatted = with_thousands(formatted, int_cols=[], float_cols=ref_cols, float_decimals=0)
-    for col in formatted.columns:
-        formatted[col] = formatted[col].apply(lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else v)
-
-    if period_labels is not None:
-        formatted[period_col] = period_labels
-    wide = formatted.set_index(period_col).T
-    wide.index.name = "Felt"
-    # Radnavnene byttes til lesbare navn FØR retur (med mindre apply_labels=False,
-    # brukt når denne tabellen skal kombineres med andre FØRST - da må radene
-    # ha IDENTISK (rå) indeks på tvers av tabellene, ellers feiler pandas sin
-    # indeks-justering ved sammenslåing (det var årsaken til at HOG-kolonnen
-    # tidligere viste "nan" for kostnadsradene).
-    if apply_labels:
-        wide = wide.rename(index=_per_kg_row_labels(cfg))
-    return wide
-
-
-def _show_per_kg_table(df, period_col, period_labels=None):
-    wide = _build_per_kg_wide(df, period_col, period_labels=period_labels)
-    _render_table(wide)
-
-
-def _fixed_costs_for_periode(fixed_costs_weekly, uker, period):
-    """Filtrerer fixed_costs_weekly til AKKURAT de ukene en valgt batch/kohort
-    dekker, og aggregerer til samme periodenivå (uke/maned/ar/totalt) som
-    resten av visningen - slik at faste kostnader kan vises SIDE OM SIDE
-    med batchens/kohortens egne tall, uten å prøve å fordele dem ned."""
-    sub = fixed_costs_weekly[fixed_costs_weekly["uke"].isin(uker)].copy()
-    if period == "uke":
-        sub["periode"] = sub["uke"]
-    elif period == "maned":
-        sub["periode"] = pd.to_datetime(sub["dato"]).dt.strftime("%Y-%m")
-    elif period == "ar":
-        sub["periode"] = pd.to_datetime(sub["dato"]).dt.isocalendar().year
-    else:
-        sub["periode"] = "Totalt"
-    kr_cols = [c for c in sub.columns if c.startswith("kr_")]
-    return sub.groupby("periode", sort=True)[kr_cols].sum().reset_index()
-
-
-def _show_kontantstrom_kombinert(df, period_col, period_labels=None, hog_faktor=1.0, fixed_costs_df=None):
-    """Viser (kr), (kr/kg WFE) og (kr/kg HOG) SIDE VED SIDE per periode -
-    slår sammen det som før var to separate tabeller (Kontantstrøm +
-    "... per kg") til én, for å spare plass og gjøre det lettere å
-    sammenligne totalt/WFE/HOG i ett blikk.
-
-    Kombineres på RÅ (ikke omdøpte) kolonnenavn først - deretter gis ÉN
-    felles, enhetsnøytral radetikett til slutt. Renner man de tre
-    delrutene med HVER SIN etikett-sett før sammenslåing, feiler pandas
-    sin indeks-justering (samme bug som ble rettet i forrige runde).
-
-    `fixed_costs_df`: valgfri, forhåndsaggregert tabell fra
-    _fixed_costs_for_periode() - viser de faste kostnadene (13-16, inkl.
-    underlinjer) SOM DE ER for periodene (FULL verdi, IKKE fordelt/redusert
-    ned til én batch/kohort sin andel) - kun i (kr)-kolonnen, siden faste
-    kostnader ikke er priset per kg WFE/HOG. Brukes i Batch-/Kohortoversikt,
-    der '13.5 Desinfeksjon' er et godt eksempel på en 'semi-variabel' post
-    (avhenger av antall kohorter i perioden, ikke av hvilken batch man ser
-    på isolert)."""
-    wide_kr_raw = _transpose_for_display(df, period_col, period_labels=period_labels)
-    wide_wfe_raw = _build_per_kg_wide(df, period_col, period_labels=period_labels,
-                                       revenue_denom_col="kg_wfe_levert", cum_denom_col="kg_wfe_levert_akkumulert",
-                                       cost_hog_faktor=1.0, apply_labels=False)
-    wide_hog_raw = _build_per_kg_wide(df, period_col, period_labels=period_labels,
-                                       revenue_denom_col="kg_solgt", cum_denom_col="kg_solgt_akkumulert",
-                                       cost_hog_faktor=hog_faktor, apply_labels=False)
-
-    # wide_kr_raw sine referanserader heter "kg_wfe_brutto"/"kg_wfe_levert"/
-    # "kg_wfe_netto_akkumulert" - gi dem samme radnavn som per-kg-tabellene
-    # ("..._ref") FØR sammenslåing, slik at radene faktisk matcher på tvers
-    # av de tre kildetabellene.
-    wide_kr_raw = wide_kr_raw.rename(index={
-        "kg_wfe_brutto": "kg_wfe_brutto_ref", "kg_wfe_levert": "kg_levert_ref",
-        "kg_wfe_netto_akkumulert": "kg_netto_ref",
-    })
-
-    rekkefolge = (["inntekt_kr"] + [f"kr_{r['id']}" for r in cfg.RESOURCES] +
-                  ["kostnad_totalt_kr", "kg_wfe_brutto_ref", "kg_levert_ref", "kg_netto_ref",
-                   "netto_kontantstrom_kr", "akkumulert_kontantstrom_kr"])
-
-    perioder = list(wide_wfe_raw.columns)
-    combined = pd.DataFrame(index=rekkefolge)
-    for p in perioder:
-        combined[f"{p} (kr)"] = wide_kr_raw[p].reindex(rekkefolge)
-        combined[f"{p} (kr/kg WFE)"] = wide_wfe_raw[p].reindex(rekkefolge)
-        combined[f"{p} (kr/kg HOG)"] = wide_hog_raw[p].reindex(rekkefolge)
-
-    # Dekningsbidrag/-grad - ISOLERT til akkurat denne batchen/kohorten/
-    # perioden (df kan være filtrert til én batch, se kalleren) - beregnes
-    # direkte fra df sine rå tall, ikke fra de allerede formaterte
-    # wide_wfe_raw/wide_hog_raw-tabellene (som inneholder STRENGER, ikke
-    # tall). Dekningsgrad (%) er en RATIO og blir identisk uansett WFE/HOG/
-    # kr-grunnlag (samme tall i alle tre kolonner)."""
-    if "inntekt_kr" in df.columns and "kostnad_totalt_kr" in df.columns:
-        dekningsbidrag_kr = df["inntekt_kr"].astype(float) - df["kostnad_totalt_kr"].astype(float)
-        dekningsgrad_pct = (dekningsbidrag_kr / df["inntekt_kr"].astype(float) * 100).where(df["inntekt_kr"] > 0)
-        dekningsbidrag_wfe = dekningsbidrag_kr / df["kg_wfe_levert"].replace(0, pd.NA) if "kg_wfe_levert" in df.columns else None
-        dekningsbidrag_hog = dekningsbidrag_kr / df["kg_solgt"].replace(0, pd.NA) if "kg_solgt" in df.columns else None
-
-        db_row = pd.Series(index=combined.columns, dtype=object)
-        dg_row = pd.Series(index=combined.columns, dtype=object)
-        for i, p in enumerate(perioder):
-            db_kr = dekningsbidrag_kr.iloc[i]
-            db_row[f"{p} (kr)"] = fmt_int(db_kr) if pd.notna(db_kr) else ""
-            db_row[f"{p} (kr/kg WFE)"] = fmt_float(dekningsbidrag_wfe.iloc[i], 2) if dekningsbidrag_wfe is not None and pd.notna(dekningsbidrag_wfe.iloc[i]) else ""
-            db_row[f"{p} (kr/kg HOG)"] = fmt_float(dekningsbidrag_hog.iloc[i], 2) if dekningsbidrag_hog is not None and pd.notna(dekningsbidrag_hog.iloc[i]) else ""
-            dg = dekningsgrad_pct.iloc[i]
-            dg_verdi = f"{fmt_float(dg, 1)} %" if pd.notna(dg) else ""
-            dg_row[f"{p} (kr)"] = dg_verdi
-            dg_row[f"{p} (kr/kg WFE)"] = dg_verdi
-            dg_row[f"{p} (kr/kg HOG)"] = dg_verdi
-        combined.loc["dekningsbidrag_rad"] = db_row
-        combined.loc["dekningsgrad_rad"] = dg_row
-
-    # FCR (fôrforbruk / bruttovekst) - samme "grunnlag"-prinsipp som
-    # kostnadslinjene: WFE-kolonnen bruker ren bruttovekst, HOG-kolonnen
-    # bruker bruttovekst x HOG-faktor - gir naturlig en HØYERE (dårligere)
-    # FCR i HOG-kolonnen, siden samme fôrmengde da måles mot færre
-    # sellbare kg. Regnes direkte her (ikke via build_per_kg, siden FCR
-    # ikke er et kr-tall)."""
-    if "mengde_for" in df.columns and "kg_wfe_brutto" in df.columns:
-        fcr_wfe = df["mengde_for"].astype(float) / df["kg_wfe_brutto"].replace(0, pd.NA)
-        fcr_hog = fcr_wfe / hog_faktor
-        fcr_row = pd.Series(index=combined.columns, dtype=object)
-        for i, p in enumerate(perioder):
-            fcr_row[f"{p} (kr)"] = ""
-            fcr_row[f"{p} (kr/kg WFE)"] = fmt_float(fcr_wfe.iloc[i], 2) if pd.notna(fcr_wfe.iloc[i]) else ""
-            fcr_row[f"{p} (kr/kg HOG)"] = fmt_float(fcr_hog.iloc[i], 2) if pd.notna(fcr_hog.iloc[i]) else ""
-        combined.loc["fcr_rad"] = fcr_row
-
-    fastkost_navn_map = {}
-    if fixed_costs_df is not None and len(fixed_costs_df) > 0:
-        fastkost_rekkefolge = (["kr_leie_anlegg"] + [f"kr_{sl['id']}" for sl in cfg.HEXACAGE_LEIE_SUBLINJER] +
-                                [f"kr_{fc['id']}" for fc in cfg.FIXED_COSTS if fc["id"] != "leie_anlegg"] +
-                                ["kr_faste_totalt"])
-        fastkost_navn_map = {"kr_leie_anlegg": "13. Leie av Big Dipper-anlegg (fast, uendret)"}
-        for sl in cfg.HEXACAGE_LEIE_SUBLINJER:
-            fastkost_navn_map[f"kr_{sl['id']}"] = f"{sl['navn']} (fast, uendret)"
-        for fc in cfg.FIXED_COSTS:
-            if fc["id"] != "leie_anlegg":
-                fastkost_navn_map[f"kr_{fc['id']}"] = f"{fc['navn']} (fast, uendret)"
-        fastkost_navn_map["kr_faste_totalt"] = "Faste kostnader totalt (fast, uendret)"
-
-        fk_wide = fixed_costs_df.set_index("periode")[fastkost_rekkefolge].T
-        for r in fastkost_rekkefolge:
-            rad = pd.Series(index=combined.columns, dtype=object)
-            for p in perioder:
-                verdi = fk_wide.loc[r, p] if p in fk_wide.columns else 0.0
-                rad[f"{p} (kr)"] = fmt_int(verdi) if pd.notna(verdi) else ""
-                rad[f"{p} (kr/kg WFE)"] = ""
-                rad[f"{p} (kr/kg HOG)"] = ""
-            combined.loc[r] = rad
-
-    combined.index.name = "Felt"
-    combined = combined.rename(index={
-        **_per_kg_row_labels(cfg), "fcr_rad": "FCR (fôr / bruttovekst)",
-        "dekningsbidrag_rad": "Dekningsbidrag", "dekningsgrad_rad": "Dekningsgrad",
-        **fastkost_navn_map,
-    })
-    combined = combined.fillna("")
-    _render_table(combined)
-
-
-visning = st.selectbox(
-    "Vis:", options=["Ukeoversikt", "Månedsoversikt", "Årsoversikt", "Kohortoversikt", "Batchoversikt"], index=4,
-    key="kontantstrom_visning",
-)
-
-fixed_costs_args = None  # settes kun for Kohort-/Batchoversikt
-
-if visning == "Ukeoversikt":
-    cf_year_options = sorted(pd.to_datetime(cashflow["dato"]).dt.isocalendar().year.unique())
-    cf_yr_pick = st.selectbox("Vis uker i år:", options=["Alle år"] + list(cf_year_options), key="cashflow_year")
-    cf_show = (cashflow if cf_yr_pick == "Alle år"
-               else cashflow[pd.to_datetime(cashflow["dato"]).dt.isocalendar().year == cf_yr_pick])
-    if n_tanker_aktiv > 1:
-        # Flere tanker i samme uke -> summert per uke (hele anlegget)
-        cf_show = summarize_cashflow_by_period(cf_show, "uke")
-        per_kg_args = (cf_show, "periode", None)
-    else:
-        per_kg_args = (cf_show, "uke", None)
-
-elif visning == "Månedsoversikt":
-    cf_maned = summarize_cashflow_by_period(cashflow, "maned")
-    cf_maned_labels = cf_maned["periode"].apply(month_label)
-    per_kg_args = (cf_maned, "periode", cf_maned_labels)
-
-elif visning == "Årsoversikt":
-    cf_ar = summarize_cashflow_by_period(cashflow, "ar")
-    per_kg_args = (cf_ar, "periode", None)
-
-elif visning == "Kohortoversikt":
-    _kohort_i_cf = {k for k in cashflow["kohort_id"] if not str(k).startswith("(")}
-    kohort_ids = [k for k in generations if k in _kohort_i_cf]  # kronologisk, ikke alfabetisk (K1, K10, K2 ...)
-    valgt_kohort = st.selectbox("Velg kohort:", options=kohort_ids, key="cashflow_kohort")
-    kohort_show = cashflow[cashflow["kohort_id"].isin([valgt_kohort, f"({valgt_kohort})"])]
-    kohort_batcher = sorted({b for b in kohort_show["batch_id"] if not str(b).startswith("(")})
-    st.caption(f"{valgt_kohort} samlet - alle batcher slått sammen: {', '.join(kohort_batcher)}.")
-
-    kohort_granularitet = st.selectbox(
-        "Vis kohorten som:", options=["Uke", "Måned", "År", "Totalt"], index=3,
-        key="cashflow_kohort_granularitet",
-    )
-    if kohort_granularitet == "Uke":
-        per_kg_args = (kohort_show, "uke", None)
-    elif kohort_granularitet == "Måned":
-        kohort_maned = summarize_cashflow_by_period(kohort_show, "maned")
-        kohort_maned_labels = kohort_maned["periode"].apply(month_label)
-        per_kg_args = (kohort_maned, "periode", kohort_maned_labels)
-    elif kohort_granularitet == "År":
-        kohort_ar = summarize_cashflow_by_period(kohort_show, "ar")
-        per_kg_args = (kohort_ar, "periode", None)
-    else:
-        kohort_total = summarize_cashflow_by_period(kohort_show, "totalt")
-        per_kg_args = (kohort_total, "periode", None)
-
-else:  # Batchoversikt
-    _batch_i_cf = {b for b in cashflow["batch_id"] if not str(b).startswith("(")}
-    batch_ids = [b["batch_id"] for info in generations.values() for b in info["batches"] if b["batch_id"] in _batch_i_cf]
-    # Default til "K1-B8" (siste batch i første kohort, typisk den mest
-    # interessante å se på først) hvis den finnes i denne kjøringen - faller
-    # tilbake til første batch i listen ellers (f.eks. færre batcher/uker
-    # per kohort enn 8).
-    _forste_kohort_id = next(iter(generations), "K1")
-    _default_batch = f"{_forste_kohort_id}-B{len(generations[_forste_kohort_id]['batches'])}" if generations else "K1-B8"
-    _batch_default_idx = batch_ids.index(_default_batch) if _default_batch in batch_ids else 0
-    valgt_batch = st.selectbox("Velg batch:", options=batch_ids, index=_batch_default_idx, key="cashflow_batch")
-    kohort_for_batch = valgt_batch.split("-B")[0]
-    # Batchens EGEN ukentlige kontantstrøm: kostnadene fra uke-for-uke-
-    # fordelingen (build_batch_ukentlig_kostnad - smolt etter antall, resten
-    # etter biomasse, KUN mens batchen fortsatt er i tanken) + inntekten i
-    # batchens leveringsuke. Rader fra innsett t.o.m. leveringsuken; etter
-    # levering finnes det ingen rader - det er slik man ser at kostnads-
-    # fordelingen opphører når batchen er solgt.
-    _bk = build_batch_ukentlig_kostnad(cfg, ledger, generations)
-    _bm = build_batch_ukentlig_mengde(cfg, ledger, generations)
-    _bk = _bk[_bk["batch_id"] == valgt_batch].sort_values("uke_idx").reset_index(drop=True)
-    _bm = _bm[_bm["batch_id"] == valgt_batch].sort_values("uke_idx").reset_index(drop=True)
-    _kr_cols = [f"kr_{r['id']}" for r in cfg.RESOURCES]
-    batch_show = _bk[["kohort_id", "batch_id", "uke", "dato"] + _kr_cols].copy()
-    batch_show["fase"] = "Vekst"
-    if len(_bm):
-        batch_show["mengde_for"] = _bm["mengde_for"].values
-    batch_show["kostnad_totalt_kr"] = batch_show[_kr_cols].sum(axis=1)
-    # Inntekt, levert kg og bruttovekst-andel fra kohortens cashflow-rader
-    _cf_b = cashflow[cashflow["batch_id"] == valgt_batch]
-    _lev_uke = _cf_b["uke"].iloc[0] if len(_cf_b) else None
-    batch_show["inntekt_kr"] = 0.0
-    batch_show["kg_wfe_levert"] = 0.0
-    batch_show["kg_solgt"] = 0.0
-    if _lev_uke is not None:
-        _i = batch_show.index[batch_show["uke"] == _lev_uke]
-        if len(_i):
-            batch_show.loc[_i, "inntekt_kr"] = float(_cf_b["inntekt_kr"].iloc[0])
-            batch_show.loc[_i, "kg_wfe_levert"] = float(_cf_b["kg_wfe_levert"].iloc[0])
-            batch_show.loc[_i, "kg_solgt"] = float(_cf_b["kg_solgt"].iloc[0])
-    # Bruttovekst-andel: kohortens ukentlige bruttovekst x batchens biomasseandel
-    # den uken (samme nøkkel som kostnadene 1-12 - fôr er den dominerende).
-    _koh_led = ledger[ledger["kohort_id"] == kohort_for_batch].set_index("uke")
-    _andel = (batch_show["kr_for"] / _koh_led["kr_for"].reindex(batch_show["uke"]).values).fillna(0.0)
-    batch_show["kg_wfe_brutto"] = _koh_led["kg_wfe_brutto"].reindex(batch_show["uke"]).values * _andel.values
-    batch_show["netto_kontantstrom_kr"] = batch_show["inntekt_kr"] - batch_show["kostnad_totalt_kr"]
-    batch_show["akkumulert_kontantstrom_kr"] = batch_show["netto_kontantstrom_kr"].cumsum()
-    batch_show["kg_wfe_levert_akkumulert"] = batch_show["kg_wfe_levert"].cumsum()
-    batch_show["kg_solgt_akkumulert"] = batch_show["kg_solgt"].cumsum()
-    batch_show["kg_wfe_netto_akkumulert"] = batch_show["kg_wfe_brutto"].cumsum()
-
-    batch_granularitet = st.selectbox(
-        "Vis batchen som:", options=["Uke", "Måned", "År", "Totalt"], index=0,
-        key="cashflow_batch_granularitet",
-    )
-
-    if batch_granularitet == "Uke":
-        st.caption(f"Viser {valgt_batch} sin egen ukentlige kontantstrøm fra innsett til levering: smolt (uke 1, "
-                   "etter antall), fôr og øvrige linjer (etter biomasseandel blant batchene som fortsatt er i "
-                   "tanken), inntekt i leveringsuken. Ingen rader etter levering - fordelingen opphører når batchen "
-                   "er solgt. Faste kostnader vises i full verdi for de samme ukene (ikke fordelt).")
-        per_kg_args = (batch_show, "uke", None)
-    elif batch_granularitet == "Måned":
-        st.caption(f"Viser {valgt_batch} sin PnL/kontantstrøm summert per måned.")
-        batch_maned = summarize_cashflow_by_period(batch_show, "maned")
-        batch_maned_labels = batch_maned["periode"].apply(month_label)
-        per_kg_args = (batch_maned, "periode", batch_maned_labels)
-    elif batch_granularitet == "År":
-        st.caption(f"Viser {valgt_batch} sin PnL/kontantstrøm summert per år.")
-        batch_ar = summarize_cashflow_by_period(batch_show, "ar")
-        per_kg_args = (batch_ar, "periode", None)
-    else:  # Totalt
-        st.caption(f"Viser {valgt_batch} sin PnL/kontantstrøm summert over hele levetiden (én kolonne).")
-        batch_total = summarize_cashflow_by_period(batch_show, "totalt")
-        per_kg_args = (batch_total, "periode", None)
-
-# ---- SELVE KONTANTSTRØMTABELLEN for valgt visning (uke/kohort/batch) - (kr),
-#      (kr/kg WFE) og (kr/kg HOG) side om side. For Batch-/Kohortoversikt
-#      vises i tillegg de faste kostnadene (13-16) for de samme periodene, i
-#      full verdi (ikke fordelt). Var falt ut av visningen - gjeninnført. ----
-_per_kg_df, _per_kg_col, _per_kg_labels = per_kg_args
-_fixed_for_vis = None
-if visning in ("Batchoversikt", "Kohortoversikt") and len(_per_kg_df):
-    _uker_vis = set(_per_kg_df["uke"]) if "uke" in _per_kg_df.columns else set(
-        (batch_show if visning == "Batchoversikt" else kohort_show)["uke"])
-    _period_vis = {"uke": "uke", "periode": None}[_per_kg_col]
-    if _period_vis is None:
-        _gran = batch_granularitet if visning == "Batchoversikt" else kohort_granularitet
-        _period_vis = {"Måned": "maned", "År": "ar", "Totalt": "totalt"}.get(_gran, "uke")
-    _fixed_for_vis = _fixed_costs_for_periode(fixed_costs_weekly, _uker_vis, _period_vis)
-if len(_per_kg_df):
-    _show_kontantstrom_kombinert(_per_kg_df, _per_kg_col, period_labels=_per_kg_labels,
-                                 hog_faktor=cfg.HOG_FAKTOR, fixed_costs_df=_fixed_for_vis)
-
-if visning == "Batchoversikt":
-    with st.expander(f"📈 Isolert utvikling {min(eskalering_ar)}-{max(eskalering_ar)} for {valgt_batch} (hele driften = kun denne batchen, escalert normalt)", expanded=False):
-        st.caption(
-            f"Hypotetisk fremskrivning: hva om HELE anleggets produksjon, hvert år, besto av "
-            f"NØYAKTIG {valgt_batch} sitt fysiske volum (samme kg fôr, samme kg WFE bruttovekst "
-            "osv.), men priset med DET ÅRETS eskalerte satser? INGEN faste kostnader (13-16) er "
-            "med her - de er anleggsnivå/semi-variable, ikke batch-nivå (samme prinsipp som "
-            f"Resultatregnskap/Balanse per batch under). Batchens fysiske volum er hentet ved å "
-            f"fordele kohorten ({kohort_for_batch}) sin TOTALE ressursbruk proporsjonalt etter "
-            f"{valgt_batch} sin andel av kohortens leverte biomasse (siden vekst-/fôrhistorikken "
-            "før salgsvinduet starter er delt mellom alle batchene i kohorten)."
-        )
-        isolert_proj, isolert_andel = build_isolert_batch_projeksjon(
-            cfg, ledger, generations, fixed_costs_weekly, kohort_for_batch, valgt_batch,
-            eskalering_ar, sales_price_kr_per_kg=cfg.SALES_PRICE_KR_PER_KG, hog_faktor=cfg.HOG_FAKTOR,
-            seasonal_index_by_week=seasonal_index_runtime, sales_price_table=_sales_price_table_runtime,
-        )
-        st.caption(f"{valgt_batch} sin andel av kohorten {kohort_for_batch}: {isolert_andel*100:.1f} % av leveransen.")
-
-        isolert_row_labels = {"periode": "År", "inntekt_kr": "Inntekt (kr)"}
+    def _cf_row_labels(cfg):
+        solgt_enhet = "HOG" if cfg.PRODUKTTYPE == "Slaktefisk" else "WFE"
+        labels = {"kohort_id": "Kohort", "batch_id": "Batch", "dato": "Dato", "fase": "Fase", "inntekt_kr": "Inntekt (kr)"}
         for r in cfg.RESOURCES:
-            isolert_row_labels[f"kr_{r['id']}"] = f"{r['navn']} (kr)"
-        isolert_row_labels["kostnad_variabel_totalt_kr"] = "Variabel kostnad totalt (kr)"
-        isolert_row_labels["dekningsbidrag_kr"] = "Dekningsbidrag (kr)"
-        isolert_row_labels["dekningsgrad_pct"] = "Dekningsgrad (%)"
-        isolert_row_labels["akkumulert_dekningsbidrag_kr"] = "Akkumulert dekningsbidrag (kr)"
-        isolert_per_kg = [c for c in isolert_proj.columns if c.endswith("__per_kg_solgt")]
-        for kol in isolert_per_kg:
-            mor_kol = kol.removesuffix("__per_kg_solgt")
-            mor_navn = isolert_row_labels.get(mor_kol, mor_kol).removesuffix(" (kr)")
-            isolert_row_labels[kol] = f"{mor_navn} per solgt kg ({solgt_enhet})"
-        isolert_per_kg_navn = [isolert_row_labels[k] for k in isolert_per_kg]
+            labels[f"kr_{r['id']}"] = f"{r['navn']} (kr)"
+        labels.update({
+            "kostnad_totalt_kr": "Kostnad totalt (kr)",
+            "netto_kontantstrom_kr": "Netto kontantstrøm (kr)",
+            "akkumulert_kontantstrom_kr": "Akkumulert kontantstrøm (kr)",
+            "kg_wfe_brutto": "Bruttovekst i perioden (kg WFE) - grunnlag for kostnadslinjene",
+            "kg_wfe_levert": "Levert kunde, denne perioden (kg WFE)",
+            "kg_wfe_netto_akkumulert": "Netto tilvekst - levert minus innkjøpt (kg WFE)",
+            "kg_wfe_levert_akkumulert": "Levert kunde, akkumulert (kg WFE)",
+            "kg_solgt": f"Solgt vekt, denne perioden (kg {solgt_enhet})",
+            "kg_solgt_akkumulert": f"Solgt vekt, akkumulert (kg {solgt_enhet})",
+        })
+        return labels
 
-        isolert_int_like = [c for c in isolert_proj.columns if c not in ("periode",)
-                             and c not in ("dekningsgrad_pct",) and c not in isolert_per_kg]
-        isolert_formatted = with_thousands(isolert_proj, int_cols=[], float_cols=isolert_int_like, float_decimals=0)
-        isolert_formatted = with_thousands(isolert_formatted, int_cols=[], float_cols=["dekningsgrad_pct"], float_decimals=1)
-        isolert_formatted = with_thousands(isolert_formatted, int_cols=[], float_cols=isolert_per_kg, float_decimals=2)
-        for col in isolert_formatted.columns:
-            isolert_formatted[col] = isolert_formatted[col].apply(
-                lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else v
+
+    def _show_cashflow_table(df, period_col, period_labels=None):
+        wide = _transpose_for_display(df, period_col, period_labels=period_labels)
+        wide = wide.rename(index=_cf_row_labels(cfg))
+        _render_table(wide)
+
+
+    def _per_kg_row_labels(cfg):
+        """Radnavnene har IKKE lenger 'WFE'/'HOG' hardkodet - enheten står i
+        kolonneoverskriften i stedet (f.eks. 'Totalt (WFE)' / 'Totalt (HOG)'),
+        så samme radnavn brukes uansett hvilken kolonne man ser på."""
+        labels = {"kohort_id": "Kohort", "batch_id": "Batch", "dato": "Dato", "fase": "Fase",
+                  "kg_wfe_brutto_ref": "Bruttovekst, grunnlag kostnadslinjer (kg)",
+                  "kg_levert_ref": "Levert biomasse (kunde), kg",
+                  "kg_netto_ref": "Netto tilvekst - levert minus innkjøpt (kg)",
+                  "inntekt_kr": "Inntekt (kr/kg)"}
+        for r in cfg.RESOURCES:
+            labels[f"kr_{r['id']}"] = f"{r['navn']} (kr/kg)"
+        labels.update({
+            "kostnad_totalt_kr": "Kostnad totalt (kr/kg)",
+            "netto_kontantstrom_kr": "Netto kontantstrøm (kr/kg)",
+            "akkumulert_kontantstrom_kr": "Akkumulert kontantstrøm (kr/kg)",
+        })
+        return labels
+
+
+    def _build_per_kg_wide(df, period_col, period_labels=None,
+                            revenue_denom_col="kg_wfe_levert", cum_denom_col="kg_wfe_levert_akkumulert",
+                            cost_hog_faktor=1.0, apply_labels=True):
+        per_kg = build_per_kg(df, revenue_denom_col=revenue_denom_col, cum_denom_col=cum_denom_col,
+                               cost_hog_faktor=cost_hog_faktor)
+
+        # TRE referanserader settes tilbake inn ØVERST, UDELT (i kg, ikke kr/kg):
+        #   1) Bruttovekst - nevneren bak kostnadslinjene (x cost_hog_faktor,
+        #      slik at HOG-kolonnen viser SIN egen faktiske nevner, ikke samme
+        #      rå WFE-tall som WFE-kolonnen).
+        #   2) Levert biomasse (kunde) - nevneren bak inntekt/netto/akkumulert
+        #      (revenue_denom_col er allerede riktig valgt av kalleren: ren
+        #      kg_wfe_levert for WFE-kolonnen, kg_solgt for HOG-kolonnen).
+        #   3) Netto tilvekst (levert MINUS innkjøpt smoltbiomasse) - samme
+        #      skalering som bruttovekst (x cost_hog_faktor), slik at man ser
+        #      levert, netto tilvekst OG brutto (kostnadsrelevant) side om side.
+        ref_cols = []
+        if "kg_wfe_brutto" in df.columns:
+            per_kg.insert(0, "kg_wfe_brutto_ref", df["kg_wfe_brutto"].to_numpy() * cost_hog_faktor)
+            ref_cols.append("kg_wfe_brutto_ref")
+        if revenue_denom_col in df.columns:
+            per_kg.insert(1, "kg_levert_ref", df[revenue_denom_col].to_numpy())
+            ref_cols.append("kg_levert_ref")
+        if "kg_wfe_netto_akkumulert" in df.columns:
+            per_kg.insert(2, "kg_netto_ref", df["kg_wfe_netto_akkumulert"].to_numpy() * cost_hog_faktor)
+            ref_cols.append("kg_netto_ref")
+
+        id_cols = ("kohort_id", "batch_id", "uke", "dato", "fase", "periode")
+        kr_per_kg_cols = [c for c in per_kg.columns if c not in id_cols and c not in ref_cols]
+
+        formatted = with_thousands(per_kg, int_cols=[], float_cols=kr_per_kg_cols, float_decimals=2)
+        if ref_cols:
+            formatted = with_thousands(formatted, int_cols=[], float_cols=ref_cols, float_decimals=0)
+        for col in formatted.columns:
+            formatted[col] = formatted[col].apply(lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else v)
+
+        if period_labels is not None:
+            formatted[period_col] = period_labels
+        wide = formatted.set_index(period_col).T
+        wide.index.name = "Felt"
+        # Radnavnene byttes til lesbare navn FØR retur (med mindre apply_labels=False,
+        # brukt når denne tabellen skal kombineres med andre FØRST - da må radene
+        # ha IDENTISK (rå) indeks på tvers av tabellene, ellers feiler pandas sin
+        # indeks-justering ved sammenslåing (det var årsaken til at HOG-kolonnen
+        # tidligere viste "nan" for kostnadsradene).
+        if apply_labels:
+            wide = wide.rename(index=_per_kg_row_labels(cfg))
+        return wide
+
+
+    def _show_per_kg_table(df, period_col, period_labels=None):
+        wide = _build_per_kg_wide(df, period_col, period_labels=period_labels)
+        _render_table(wide)
+
+
+    def _fixed_costs_for_periode(fixed_costs_weekly, uker, period):
+        """Filtrerer fixed_costs_weekly til AKKURAT de ukene en valgt batch/kohort
+        dekker, og aggregerer til samme periodenivå (uke/maned/ar/totalt) som
+        resten av visningen - slik at faste kostnader kan vises SIDE OM SIDE
+        med batchens/kohortens egne tall, uten å prøve å fordele dem ned."""
+        sub = fixed_costs_weekly[fixed_costs_weekly["uke"].isin(uker)].copy()
+        if period == "uke":
+            sub["periode"] = sub["uke"]
+        elif period == "maned":
+            sub["periode"] = pd.to_datetime(sub["dato"]).dt.strftime("%Y-%m")
+        elif period == "ar":
+            sub["periode"] = pd.to_datetime(sub["dato"]).dt.isocalendar().year
+        else:
+            sub["periode"] = "Totalt"
+        kr_cols = [c for c in sub.columns if c.startswith("kr_")]
+        return sub.groupby("periode", sort=True)[kr_cols].sum().reset_index()
+
+
+    def _show_kontantstrom_kombinert(df, period_col, period_labels=None, hog_faktor=1.0, fixed_costs_df=None):
+        """Viser (kr), (kr/kg WFE) og (kr/kg HOG) SIDE VED SIDE per periode -
+        slår sammen det som før var to separate tabeller (Kontantstrøm +
+        "... per kg") til én, for å spare plass og gjøre det lettere å
+        sammenligne totalt/WFE/HOG i ett blikk.
+
+        Kombineres på RÅ (ikke omdøpte) kolonnenavn først - deretter gis ÉN
+        felles, enhetsnøytral radetikett til slutt. Renner man de tre
+        delrutene med HVER SIN etikett-sett før sammenslåing, feiler pandas
+        sin indeks-justering (samme bug som ble rettet i forrige runde).
+
+        `fixed_costs_df`: valgfri, forhåndsaggregert tabell fra
+        _fixed_costs_for_periode() - viser de faste kostnadene (13-16, inkl.
+        underlinjer) SOM DE ER for periodene (FULL verdi, IKKE fordelt/redusert
+        ned til én batch/kohort sin andel) - kun i (kr)-kolonnen, siden faste
+        kostnader ikke er priset per kg WFE/HOG. Brukes i Batch-/Kohortoversikt,
+        der '13.5 Desinfeksjon' er et godt eksempel på en 'semi-variabel' post
+        (avhenger av antall kohorter i perioden, ikke av hvilken batch man ser
+        på isolert)."""
+        wide_kr_raw = _transpose_for_display(df, period_col, period_labels=period_labels)
+        wide_wfe_raw = _build_per_kg_wide(df, period_col, period_labels=period_labels,
+                                           revenue_denom_col="kg_wfe_levert", cum_denom_col="kg_wfe_levert_akkumulert",
+                                           cost_hog_faktor=1.0, apply_labels=False)
+        wide_hog_raw = _build_per_kg_wide(df, period_col, period_labels=period_labels,
+                                           revenue_denom_col="kg_solgt", cum_denom_col="kg_solgt_akkumulert",
+                                           cost_hog_faktor=hog_faktor, apply_labels=False)
+
+        # wide_kr_raw sine referanserader heter "kg_wfe_brutto"/"kg_wfe_levert"/
+        # "kg_wfe_netto_akkumulert" - gi dem samme radnavn som per-kg-tabellene
+        # ("..._ref") FØR sammenslåing, slik at radene faktisk matcher på tvers
+        # av de tre kildetabellene.
+        wide_kr_raw = wide_kr_raw.rename(index={
+            "kg_wfe_brutto": "kg_wfe_brutto_ref", "kg_wfe_levert": "kg_levert_ref",
+            "kg_wfe_netto_akkumulert": "kg_netto_ref",
+        })
+
+        rekkefolge = (["inntekt_kr"] + [f"kr_{r['id']}" for r in cfg.RESOURCES] +
+                      ["kostnad_totalt_kr", "kg_wfe_brutto_ref", "kg_levert_ref", "kg_netto_ref",
+                       "netto_kontantstrom_kr", "akkumulert_kontantstrom_kr"])
+
+        perioder = list(wide_wfe_raw.columns)
+        combined = pd.DataFrame(index=rekkefolge)
+        for p in perioder:
+            combined[f"{p} (kr)"] = wide_kr_raw[p].reindex(rekkefolge)
+            combined[f"{p} (kr/kg WFE)"] = wide_wfe_raw[p].reindex(rekkefolge)
+            combined[f"{p} (kr/kg HOG)"] = wide_hog_raw[p].reindex(rekkefolge)
+
+        # Dekningsbidrag/-grad - ISOLERT til akkurat denne batchen/kohorten/
+        # perioden (df kan være filtrert til én batch, se kalleren) - beregnes
+        # direkte fra df sine rå tall, ikke fra de allerede formaterte
+        # wide_wfe_raw/wide_hog_raw-tabellene (som inneholder STRENGER, ikke
+        # tall). Dekningsgrad (%) er en RATIO og blir identisk uansett WFE/HOG/
+        # kr-grunnlag (samme tall i alle tre kolonner)."""
+        if "inntekt_kr" in df.columns and "kostnad_totalt_kr" in df.columns:
+            dekningsbidrag_kr = df["inntekt_kr"].astype(float) - df["kostnad_totalt_kr"].astype(float)
+            dekningsgrad_pct = (dekningsbidrag_kr / df["inntekt_kr"].astype(float) * 100).where(df["inntekt_kr"] > 0)
+            dekningsbidrag_wfe = dekningsbidrag_kr / df["kg_wfe_levert"].replace(0, pd.NA) if "kg_wfe_levert" in df.columns else None
+            dekningsbidrag_hog = dekningsbidrag_kr / df["kg_solgt"].replace(0, pd.NA) if "kg_solgt" in df.columns else None
+
+            db_row = pd.Series(index=combined.columns, dtype=object)
+            dg_row = pd.Series(index=combined.columns, dtype=object)
+            for i, p in enumerate(perioder):
+                db_kr = dekningsbidrag_kr.iloc[i]
+                db_row[f"{p} (kr)"] = fmt_int(db_kr) if pd.notna(db_kr) else ""
+                db_row[f"{p} (kr/kg WFE)"] = fmt_float(dekningsbidrag_wfe.iloc[i], 2) if dekningsbidrag_wfe is not None and pd.notna(dekningsbidrag_wfe.iloc[i]) else ""
+                db_row[f"{p} (kr/kg HOG)"] = fmt_float(dekningsbidrag_hog.iloc[i], 2) if dekningsbidrag_hog is not None and pd.notna(dekningsbidrag_hog.iloc[i]) else ""
+                dg = dekningsgrad_pct.iloc[i]
+                dg_verdi = f"{fmt_float(dg, 1)} %" if pd.notna(dg) else ""
+                dg_row[f"{p} (kr)"] = dg_verdi
+                dg_row[f"{p} (kr/kg WFE)"] = dg_verdi
+                dg_row[f"{p} (kr/kg HOG)"] = dg_verdi
+            combined.loc["dekningsbidrag_rad"] = db_row
+            combined.loc["dekningsgrad_rad"] = dg_row
+
+        # FCR (fôrforbruk / bruttovekst) - samme "grunnlag"-prinsipp som
+        # kostnadslinjene: WFE-kolonnen bruker ren bruttovekst, HOG-kolonnen
+        # bruker bruttovekst x HOG-faktor - gir naturlig en HØYERE (dårligere)
+        # FCR i HOG-kolonnen, siden samme fôrmengde da måles mot færre
+        # sellbare kg. Regnes direkte her (ikke via build_per_kg, siden FCR
+        # ikke er et kr-tall)."""
+        if "mengde_for" in df.columns and "kg_wfe_brutto" in df.columns:
+            fcr_wfe = df["mengde_for"].astype(float) / df["kg_wfe_brutto"].replace(0, pd.NA)
+            fcr_hog = fcr_wfe / hog_faktor
+            fcr_row = pd.Series(index=combined.columns, dtype=object)
+            for i, p in enumerate(perioder):
+                fcr_row[f"{p} (kr)"] = ""
+                fcr_row[f"{p} (kr/kg WFE)"] = fmt_float(fcr_wfe.iloc[i], 2) if pd.notna(fcr_wfe.iloc[i]) else ""
+                fcr_row[f"{p} (kr/kg HOG)"] = fmt_float(fcr_hog.iloc[i], 2) if pd.notna(fcr_hog.iloc[i]) else ""
+            combined.loc["fcr_rad"] = fcr_row
+
+        fastkost_navn_map = {}
+        if fixed_costs_df is not None and len(fixed_costs_df) > 0:
+            fastkost_rekkefolge = (["kr_leie_anlegg"] + [f"kr_{sl['id']}" for sl in cfg.HEXACAGE_LEIE_SUBLINJER] +
+                                    [f"kr_{fc['id']}" for fc in cfg.FIXED_COSTS if fc["id"] != "leie_anlegg"] +
+                                    ["kr_faste_totalt"])
+            fastkost_navn_map = {"kr_leie_anlegg": ("13. Anleggskostnader, eget anlegg (fast, uendret)" if landanlegg else "13. Leie av Big Dipper-anlegg (fast, uendret)")}
+            for sl in cfg.HEXACAGE_LEIE_SUBLINJER:
+                fastkost_navn_map[f"kr_{sl['id']}"] = f"{sl['navn']} (fast, uendret)"
+            for fc in cfg.FIXED_COSTS:
+                if fc["id"] != "leie_anlegg":
+                    fastkost_navn_map[f"kr_{fc['id']}"] = f"{fc['navn']} (fast, uendret)"
+            fastkost_navn_map["kr_faste_totalt"] = "Faste kostnader totalt (fast, uendret)"
+
+            fk_wide = fixed_costs_df.set_index("periode")[fastkost_rekkefolge].T
+            for r in fastkost_rekkefolge:
+                rad = pd.Series(index=combined.columns, dtype=object)
+                for p in perioder:
+                    verdi = fk_wide.loc[r, p] if p in fk_wide.columns else 0.0
+                    rad[f"{p} (kr)"] = fmt_int(verdi) if pd.notna(verdi) else ""
+                    rad[f"{p} (kr/kg WFE)"] = ""
+                    rad[f"{p} (kr/kg HOG)"] = ""
+                combined.loc[r] = rad
+
+        combined.index.name = "Felt"
+        combined = combined.rename(index={
+            **_per_kg_row_labels(cfg), "fcr_rad": "FCR (fôr / bruttovekst)",
+            "dekningsbidrag_rad": "Dekningsbidrag", "dekningsgrad_rad": "Dekningsgrad",
+            **fastkost_navn_map,
+        })
+        combined = combined.fillna("")
+        _render_table(combined)
+
+
+    visning = st.selectbox(
+        "Vis:", options=["Ukeoversikt", "Månedsoversikt", "Årsoversikt", "Kohortoversikt", "Batchoversikt"], index=4,
+        key="kontantstrom_visning",
+    )
+
+    fixed_costs_args = None  # settes kun for Kohort-/Batchoversikt
+
+    if visning == "Ukeoversikt":
+        cf_year_options = sorted(pd.to_datetime(cashflow["dato"]).dt.isocalendar().year.unique())
+        cf_yr_pick = st.selectbox("Vis uker i år:", options=["Alle år"] + list(cf_year_options), key="cashflow_year")
+        cf_show = (cashflow if cf_yr_pick == "Alle år"
+                   else cashflow[pd.to_datetime(cashflow["dato"]).dt.isocalendar().year == cf_yr_pick])
+        if n_tanker_aktiv > 1:
+            # Flere tanker i samme uke -> summert per uke (hele anlegget)
+            cf_show = summarize_cashflow_by_period(cf_show, "uke")
+            per_kg_args = (cf_show, "periode", None)
+        else:
+            per_kg_args = (cf_show, "uke", None)
+
+    elif visning == "Månedsoversikt":
+        cf_maned = summarize_cashflow_by_period(cashflow, "maned")
+        cf_maned_labels = cf_maned["periode"].apply(month_label)
+        per_kg_args = (cf_maned, "periode", cf_maned_labels)
+
+    elif visning == "Årsoversikt":
+        cf_ar = summarize_cashflow_by_period(cashflow, "ar")
+        per_kg_args = (cf_ar, "periode", None)
+
+    elif visning == "Kohortoversikt":
+        _kohort_i_cf = {k for k in cashflow["kohort_id"] if not str(k).startswith("(")}
+        kohort_ids = [k for k in generations if k in _kohort_i_cf]  # kronologisk, ikke alfabetisk (K1, K10, K2 ...)
+        valgt_kohort = st.selectbox("Velg kohort:", options=kohort_ids, key="cashflow_kohort")
+        kohort_show = cashflow[cashflow["kohort_id"].isin([valgt_kohort, f"({valgt_kohort})"])]
+        kohort_batcher = sorted({b for b in kohort_show["batch_id"] if not str(b).startswith("(")})
+        st.caption(f"{valgt_kohort} samlet - alle batcher slått sammen: {', '.join(kohort_batcher)}.")
+
+        kohort_granularitet = st.selectbox(
+            "Vis kohorten som:", options=["Uke", "Måned", "År", "Totalt"], index=3,
+            key="cashflow_kohort_granularitet",
+        )
+        if kohort_granularitet == "Uke":
+            per_kg_args = (kohort_show, "uke", None)
+        elif kohort_granularitet == "Måned":
+            kohort_maned = summarize_cashflow_by_period(kohort_show, "maned")
+            kohort_maned_labels = kohort_maned["periode"].apply(month_label)
+            per_kg_args = (kohort_maned, "periode", kohort_maned_labels)
+        elif kohort_granularitet == "År":
+            kohort_ar = summarize_cashflow_by_period(kohort_show, "ar")
+            per_kg_args = (kohort_ar, "periode", None)
+        else:
+            kohort_total = summarize_cashflow_by_period(kohort_show, "totalt")
+            per_kg_args = (kohort_total, "periode", None)
+
+    else:  # Batchoversikt
+        _batch_i_cf = {b for b in cashflow["batch_id"] if not str(b).startswith("(")}
+        batch_ids = [b["batch_id"] for info in generations.values() for b in info["batches"] if b["batch_id"] in _batch_i_cf]
+        # Default til "K1-B8" (siste batch i første kohort, typisk den mest
+        # interessante å se på først) hvis den finnes i denne kjøringen - faller
+        # tilbake til første batch i listen ellers (f.eks. færre batcher/uker
+        # per kohort enn 8).
+        _forste_kohort_id = next(iter(generations), "K1")
+        _default_batch = f"{_forste_kohort_id}-B{len(generations[_forste_kohort_id]['batches'])}" if generations else "K1-B8"
+        _batch_default_idx = batch_ids.index(_default_batch) if _default_batch in batch_ids else 0
+        valgt_batch = st.selectbox("Velg batch:", options=batch_ids, index=_batch_default_idx, key="cashflow_batch")
+        kohort_for_batch = valgt_batch.split("-B")[0]
+        # Batchens EGEN ukentlige kontantstrøm: kostnadene fra uke-for-uke-
+        # fordelingen (build_batch_ukentlig_kostnad - smolt etter antall, resten
+        # etter biomasse, KUN mens batchen fortsatt er i tanken) + inntekten i
+        # batchens leveringsuke. Rader fra innsett t.o.m. leveringsuken; etter
+        # levering finnes det ingen rader - det er slik man ser at kostnads-
+        # fordelingen opphører når batchen er solgt.
+        _bk = build_batch_ukentlig_kostnad(cfg, ledger, generations)
+        _bm = build_batch_ukentlig_mengde(cfg, ledger, generations)
+        _bk = _bk[_bk["batch_id"] == valgt_batch].sort_values("uke_idx").reset_index(drop=True)
+        _bm = _bm[_bm["batch_id"] == valgt_batch].sort_values("uke_idx").reset_index(drop=True)
+        _kr_cols = [f"kr_{r['id']}" for r in cfg.RESOURCES]
+        batch_show = _bk[["kohort_id", "batch_id", "uke", "dato"] + _kr_cols].copy()
+        batch_show["fase"] = "Vekst"
+        if len(_bm):
+            batch_show["mengde_for"] = _bm["mengde_for"].values
+        batch_show["kostnad_totalt_kr"] = batch_show[_kr_cols].sum(axis=1)
+        # Inntekt, levert kg og bruttovekst-andel fra kohortens cashflow-rader
+        _cf_b = cashflow[cashflow["batch_id"] == valgt_batch]
+        _lev_uke = _cf_b["uke"].iloc[0] if len(_cf_b) else None
+        batch_show["inntekt_kr"] = 0.0
+        batch_show["kg_wfe_levert"] = 0.0
+        batch_show["kg_solgt"] = 0.0
+        if _lev_uke is not None:
+            _i = batch_show.index[batch_show["uke"] == _lev_uke]
+            if len(_i):
+                batch_show.loc[_i, "inntekt_kr"] = float(_cf_b["inntekt_kr"].iloc[0])
+                batch_show.loc[_i, "kg_wfe_levert"] = float(_cf_b["kg_wfe_levert"].iloc[0])
+                batch_show.loc[_i, "kg_solgt"] = float(_cf_b["kg_solgt"].iloc[0])
+        # Bruttovekst-andel: kohortens ukentlige bruttovekst x batchens biomasseandel
+        # den uken (samme nøkkel som kostnadene 1-12 - fôr er den dominerende).
+        _koh_led = ledger[ledger["kohort_id"] == kohort_for_batch].set_index("uke")
+        _andel = (batch_show["kr_for"] / _koh_led["kr_for"].reindex(batch_show["uke"]).values).fillna(0.0)
+        batch_show["kg_wfe_brutto"] = _koh_led["kg_wfe_brutto"].reindex(batch_show["uke"]).values * _andel.values
+        batch_show["netto_kontantstrom_kr"] = batch_show["inntekt_kr"] - batch_show["kostnad_totalt_kr"]
+        batch_show["akkumulert_kontantstrom_kr"] = batch_show["netto_kontantstrom_kr"].cumsum()
+        batch_show["kg_wfe_levert_akkumulert"] = batch_show["kg_wfe_levert"].cumsum()
+        batch_show["kg_solgt_akkumulert"] = batch_show["kg_solgt"].cumsum()
+        batch_show["kg_wfe_netto_akkumulert"] = batch_show["kg_wfe_brutto"].cumsum()
+
+        batch_granularitet = st.selectbox(
+            "Vis batchen som:", options=["Uke", "Måned", "År", "Totalt"], index=0,
+            key="cashflow_batch_granularitet",
+        )
+
+        if batch_granularitet == "Uke":
+            st.caption(f"Viser {valgt_batch} sin egen ukentlige kontantstrøm fra innsett til levering: smolt (uke 1, "
+                       "etter antall), fôr og øvrige linjer (etter biomasseandel blant batchene som fortsatt er i "
+                       "tanken), inntekt i leveringsuken. Ingen rader etter levering - fordelingen opphører når batchen "
+                       "er solgt. Faste kostnader vises i full verdi for de samme ukene (ikke fordelt).")
+            per_kg_args = (batch_show, "uke", None)
+        elif batch_granularitet == "Måned":
+            st.caption(f"Viser {valgt_batch} sin PnL/kontantstrøm summert per måned.")
+            batch_maned = summarize_cashflow_by_period(batch_show, "maned")
+            batch_maned_labels = batch_maned["periode"].apply(month_label)
+            per_kg_args = (batch_maned, "periode", batch_maned_labels)
+        elif batch_granularitet == "År":
+            st.caption(f"Viser {valgt_batch} sin PnL/kontantstrøm summert per år.")
+            batch_ar = summarize_cashflow_by_period(batch_show, "ar")
+            per_kg_args = (batch_ar, "periode", None)
+        else:  # Totalt
+            st.caption(f"Viser {valgt_batch} sin PnL/kontantstrøm summert over hele levetiden (én kolonne).")
+            batch_total = summarize_cashflow_by_period(batch_show, "totalt")
+            per_kg_args = (batch_total, "periode", None)
+
+    # ---- SELVE KONTANTSTRØMTABELLEN for valgt visning (uke/kohort/batch) - (kr),
+    #      (kr/kg WFE) og (kr/kg HOG) side om side. For Batch-/Kohortoversikt
+    #      vises i tillegg de faste kostnadene (13-16) for de samme periodene, i
+    #      full verdi (ikke fordelt). Var falt ut av visningen - gjeninnført. ----
+    _per_kg_df, _per_kg_col, _per_kg_labels = per_kg_args
+    _fixed_for_vis = None
+    if visning in ("Batchoversikt", "Kohortoversikt") and len(_per_kg_df):
+        _uker_vis = set(_per_kg_df["uke"]) if "uke" in _per_kg_df.columns else set(
+            (batch_show if visning == "Batchoversikt" else kohort_show)["uke"])
+        _period_vis = {"uke": "uke", "periode": None}[_per_kg_col]
+        if _period_vis is None:
+            _gran = batch_granularitet if visning == "Batchoversikt" else kohort_granularitet
+            _period_vis = {"Måned": "maned", "År": "ar", "Totalt": "totalt"}.get(_gran, "uke")
+        _fixed_for_vis = _fixed_costs_for_periode(fixed_costs_weekly, _uker_vis, _period_vis)
+    if len(_per_kg_df):
+        _show_kontantstrom_kombinert(_per_kg_df, _per_kg_col, period_labels=_per_kg_labels,
+                                     hog_faktor=cfg.HOG_FAKTOR, fixed_costs_df=_fixed_for_vis)
+
+    if visning == "Batchoversikt":
+        with st.expander(f"📈 Isolert utvikling {min(eskalering_ar)}-{max(eskalering_ar)} for {valgt_batch} (hele driften = kun denne batchen, escalert normalt)", expanded=False):
+            st.caption(
+                f"Hypotetisk fremskrivning: hva om HELE anleggets produksjon, hvert år, besto av "
+                f"NØYAKTIG {valgt_batch} sitt fysiske volum (samme kg fôr, samme kg WFE bruttovekst "
+                "osv.), men priset med DET ÅRETS eskalerte satser? INGEN faste kostnader (13-16) er "
+                "med her - de er anleggsnivå/semi-variable, ikke batch-nivå (samme prinsipp som "
+                f"Resultatregnskap/Balanse per batch under). Batchens fysiske volum er hentet ved å "
+                f"fordele kohorten ({kohort_for_batch}) sin TOTALE ressursbruk proporsjonalt etter "
+                f"{valgt_batch} sin andel av kohortens leverte biomasse (siden vekst-/fôrhistorikken "
+                "før salgsvinduet starter er delt mellom alle batchene i kohorten)."
             )
-        isolert_wide = isolert_formatted.set_index("periode").T
-        isolert_wide.index.name = "Felt"
-        isolert_wide = isolert_wide.rename(index=isolert_row_labels)
-        _render_table(isolert_wide, highlight_groups=[
-            {"rows": isolert_per_kg_navn, "bg": "#fbf3e6", "text": "#9a6b2a"},
-        ])
+            isolert_proj, isolert_andel = build_isolert_batch_projeksjon(
+                cfg, ledger, generations, fixed_costs_weekly, kohort_for_batch, valgt_batch,
+                eskalering_ar, sales_price_kr_per_kg=cfg.SALES_PRICE_KR_PER_KG, hog_faktor=cfg.HOG_FAKTOR,
+                seasonal_index_by_week=seasonal_index_runtime, sales_price_table=_sales_price_table_runtime,
+            )
+            st.caption(f"{valgt_batch} sin andel av kohorten {kohort_for_batch}: {isolert_andel*100:.1f} % av leveransen.")
 
-    with st.expander(f"📄 Resultatregnskap og Balanse - {valgt_batch} isolert (ekskl. faste kostnader)", expanded=False):
-        st.caption(
-            f"Egen, isolert PnL og Balanse for AKKURAT {valgt_batch} - INGEN faste kostnader "
-            "(13-16) inkludert, siden disse er anleggsnivå/semi-variable, ikke batch-nivå "
-            "(f.eks. avhenger '13.5 Desinfeksjon' av antall kohorter i perioden, ikke av "
-            f"hvilken batch man ser på). Kostnadene (0-12) er {valgt_batch} sin andel av "
-            f"kohorten ({kohort_for_batch}) sin ukentlige kostnad GJENNOM HELE VEKSTPERIODEN "
-            "(ikke bare i leveringsuken), slik at batchens EGEN biologiske eiendel bygger seg "
-            "gradvis opp under vekst og tømmes helt i akkurat DENNE batchens leveringsuke."
-        )
-        batch_resultat, batch_balanse, batch_kontantstrom = build_batch_resultat_og_balanse(
-            cfg, ledger, cashflow, generations, kohort_for_batch, valgt_batch,
-            cfg.START_ISO_YEAR, cfg.START_ISO_WEEK, kundefrist_uker=2, leverandorfrist_uker=1,
-        )
+            isolert_row_labels = {"periode": "År", "inntekt_kr": "Inntekt (kr)"}
+            for r in cfg.RESOURCES:
+                isolert_row_labels[f"kr_{r['id']}"] = f"{r['navn']} (kr)"
+            isolert_row_labels["kostnad_variabel_totalt_kr"] = "Variabel kostnad totalt (kr)"
+            isolert_row_labels["dekningsbidrag_kr"] = "Dekningsbidrag (kr)"
+            isolert_row_labels["dekningsgrad_pct"] = "Dekningsgrad (%)"
+            isolert_row_labels["akkumulert_dekningsbidrag_kr"] = "Akkumulert dekningsbidrag (kr)"
+            isolert_per_kg = [c for c in isolert_proj.columns if c.endswith("__per_kg_solgt")]
+            for kol in isolert_per_kg:
+                mor_kol = kol.removesuffix("__per_kg_solgt")
+                mor_navn = isolert_row_labels.get(mor_kol, mor_kol).removesuffix(" (kr)")
+                isolert_row_labels[kol] = f"{mor_navn} per solgt kg ({solgt_enhet})"
+            isolert_per_kg_navn = [isolert_row_labels[k] for k in isolert_per_kg]
 
-        st.markdown("**Resultatregnskap**")
-        batch_resultat_row_labels = {
-            "uke": "Uke", "inntekt_kr": "Driftsinntekter (kr)", "varekostnad_kr": "Varekostnad (kr)",
-            "bruttofortjeneste_kr": "Bruttofortjeneste (kr)", "lonnskostnader_kr": "Lønnskostnader (kr)",
-            "arsresultat_for_skatt_kr": "Årsresultat før skatt (kr)",
-        }
-        batch_resultat_fmt = with_thousands(
-            batch_resultat.drop(columns=["dato"]), int_cols=[],
-            float_cols=[c for c in batch_resultat.columns if c not in ("uke", "dato")], float_decimals=0,
-        )
-        batch_resultat_wide = batch_resultat_fmt.set_index("uke").T
-        batch_resultat_wide.index.name = "Felt"
-        batch_resultat_wide = batch_resultat_wide.rename(index=batch_resultat_row_labels)
-        BATCH_FELT_BREDDE_PX = 320  # delt bredde for Resultatregnskap/Kontantstrøm/Balanse - se under
-        _render_table(batch_resultat_wide, fixed_label_width_px=BATCH_FELT_BREDDE_PX, highlight_groups=[
-            {"rows": ["Bruttofortjeneste (kr)", "Årsresultat før skatt (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
-        ])
+            isolert_int_like = [c for c in isolert_proj.columns if c not in ("periode",)
+                                 and c not in ("dekningsgrad_pct",) and c not in isolert_per_kg]
+            isolert_formatted = with_thousands(isolert_proj, int_cols=[], float_cols=isolert_int_like, float_decimals=0)
+            isolert_formatted = with_thousands(isolert_formatted, int_cols=[], float_cols=["dekningsgrad_pct"], float_decimals=1)
+            isolert_formatted = with_thousands(isolert_formatted, int_cols=[], float_cols=isolert_per_kg, float_decimals=2)
+            for col in isolert_formatted.columns:
+                isolert_formatted[col] = isolert_formatted[col].apply(
+                    lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else v
+                )
+            isolert_wide = isolert_formatted.set_index("periode").T
+            isolert_wide.index.name = "Felt"
+            isolert_wide = isolert_wide.rename(index=isolert_row_labels)
+            _render_table(isolert_wide, highlight_groups=[
+                {"rows": isolert_per_kg_navn, "bg": "#fbf3e6", "text": "#9a6b2a"},
+            ])
 
-        # ---- Headline: operasjonell kapital-behov for DENNE batchen ----
-        batch_bunn_idx = batch_kontantstrom["akkumulert_kontantstrom_kr"].idxmin()
-        batch_bunn_verdi = batch_kontantstrom.loc[batch_bunn_idx, "akkumulert_kontantstrom_kr"]
-        batch_bunn_uke = batch_kontantstrom.loc[batch_bunn_idx, "uke"]
-        batch_bunn_dato = pd.to_datetime(batch_kontantstrom.loc[batch_bunn_idx, "dato"])
-        batch_sluttresultat = batch_kontantstrom["akkumulert_kontantstrom_kr"].iloc[-1]
-        batch_forhold_pct = (batch_sluttresultat / abs(batch_bunn_verdi) * 100) if batch_bunn_verdi != 0 else None
+        with st.expander(f"📄 Resultatregnskap og Balanse - {valgt_batch} isolert (ekskl. faste kostnader)", expanded=False):
+            st.caption(
+                f"Egen, isolert PnL og Balanse for AKKURAT {valgt_batch} - INGEN faste kostnader "
+                "(13-16) inkludert, siden disse er anleggsnivå/semi-variable, ikke batch-nivå "
+                "(f.eks. avhenger '13.5 Desinfeksjon' av antall kohorter i perioden, ikke av "
+                f"hvilken batch man ser på). Kostnadene (0-12) er {valgt_batch} sin andel av "
+                f"kohorten ({kohort_for_batch}) sin ukentlige kostnad GJENNOM HELE VEKSTPERIODEN "
+                "(ikke bare i leveringsuken), slik at batchens EGEN biologiske eiendel bygger seg "
+                "gradvis opp under vekst og tømmes helt i akkurat DENNE batchens leveringsuke."
+            )
+            batch_resultat, batch_balanse, batch_kontantstrom = build_batch_resultat_og_balanse(
+                cfg, ledger, cashflow, generations, kohort_for_batch, valgt_batch,
+                cfg.START_ISO_YEAR, cfg.START_ISO_WEEK, kundefrist_uker=2, leverandorfrist_uker=1,
+            )
 
-        hc1, hc2, hc3, hc4 = st.columns(4)
-        hc1.metric(
-            f"Operasjonell kapital {valgt_batch} krever",
-            f"{fmt_int(abs(batch_bunn_verdi))} kr",
-            help="Det største akkumulerte kontantunderskuddet gjennom batchens levetid - hvor "
-                 "mye kapital som må være tilgjengelig for å dekke denne ene batchen helt til "
-                 "den leveres og genererer inntekt.",
-        )
-        hc2.metric(
-            "Peaker i",
-            f"{batch_bunn_uke} ({batch_bunn_dato.strftime('%b %Y')})",
-            help="Uken/måneden der batchens akkumulerte kontantstrøm når sitt laveste punkt.",
-        )
-        hc3.metric(
-            "Netto kontantstrøm / operasjonell kapital",
-            f"{fmt_float(batch_forhold_pct, 0)} %" if batch_forhold_pct is not None else "–",
-            help="Batchens totale netto kontantstrøm ved levetidens slutt, delt på den "
-                 "operasjonelle kapitalen den krevde på det verste - et mål på avkastning "
-                 "relativt til kapitalen som var bundet opp.",
-        )
-        hc4.metric(
-            "Akkumulert netto kontantstrøm mottatt",
-            f"{fmt_int(batch_sluttresultat)} kr",
-            help="Batchens akkumulerte netto kontantstrøm slik den står ved siste uke - det "
-                 "oppdretter faktisk sitter igjen med i kontanter fra denne batchen alene, "
-                 "etter at alle betalinger og innbetalinger for batchen er gjort opp.",
-        )
+            st.markdown("**Resultatregnskap**")
+            batch_resultat_row_labels = {
+                "uke": "Uke", "inntekt_kr": "Driftsinntekter (kr)", "varekostnad_kr": "Varekostnad (kr)",
+                "bruttofortjeneste_kr": "Bruttofortjeneste (kr)", "lonnskostnader_kr": "Lønnskostnader (kr)",
+                "arsresultat_for_skatt_kr": "Årsresultat før skatt (kr)",
+            }
+            batch_resultat_fmt = with_thousands(
+                batch_resultat.drop(columns=["dato"]), int_cols=[],
+                float_cols=[c for c in batch_resultat.columns if c not in ("uke", "dato")], float_decimals=0,
+            )
+            batch_resultat_wide = batch_resultat_fmt.set_index("uke").T
+            batch_resultat_wide.index.name = "Felt"
+            batch_resultat_wide = batch_resultat_wide.rename(index=batch_resultat_row_labels)
+            BATCH_FELT_BREDDE_PX = 320  # delt bredde for Resultatregnskap/Kontantstrøm/Balanse - se under
+            _render_table(batch_resultat_wide, fixed_label_width_px=BATCH_FELT_BREDDE_PX, highlight_groups=[
+                {"rows": ["Bruttofortjeneste (kr)", "Årsresultat før skatt (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
+            ])
 
-        st.markdown("**Kontantstrøm**")
-        st.caption(
-            "Viser den FAKTISKE kontantbevegelsen, MED betalingsutsettelse (kunder betaler 2 "
-            "uker etter levering, leverandører betales 1 uke etter at kostnaden påløper) - til "
-            "forskjell fra Resultatregnskapet over, som bruker MATCHET kostnad (alt bokføres i "
-            "leveringsuken). Hver kostnadslinje (0-12) er spesifisert BÅDE når den påløper OG "
-            "når den faktisk betales, slik at hele bildet kan gås gjennom linje for linje. "
-            "'Akkumulert kontantstrøm' stemmer nøyaktig med 'Kontanter' i Balansen under."
-        )
-        batch_kontantstrom_row_labels = {"uke": "Uke", "palopt_inntekt_kr": "Påløpt inntekt (kr)"}
-        for r in cfg.RESOURCES:
-            batch_kontantstrom_row_labels[f"palopt_{r['id']}_kr"] = f"Påløpt - {r['navn']} (kr)"
-        batch_kontantstrom_row_labels["palopt_kostnad_totalt_kr"] = "Påløpt kostnad totalt (kr)"
-        batch_kontantstrom_row_labels["innbetalt_kr"] = "Innbetalt fra kunder (kr)"
-        for r in cfg.RESOURCES:
-            batch_kontantstrom_row_labels[f"utbetalt_{r['id']}_kr"] = f"Utbetalt - {r['navn']} (kr)"
-        batch_kontantstrom_row_labels["utbetalt_kostnad_totalt_kr"] = "Utbetalt til leverandører totalt (kr)"
-        batch_kontantstrom_row_labels["netto_kontantstrom_kr"] = "Netto kontantstrøm (kr)"
-        batch_kontantstrom_row_labels["akkumulert_kontantstrom_kr"] = "Akkumulert kontantstrøm (kr)"
+            # ---- Headline: operasjonell kapital-behov for DENNE batchen ----
+            batch_bunn_idx = batch_kontantstrom["akkumulert_kontantstrom_kr"].idxmin()
+            batch_bunn_verdi = batch_kontantstrom.loc[batch_bunn_idx, "akkumulert_kontantstrom_kr"]
+            batch_bunn_uke = batch_kontantstrom.loc[batch_bunn_idx, "uke"]
+            batch_bunn_dato = pd.to_datetime(batch_kontantstrom.loc[batch_bunn_idx, "dato"])
+            batch_sluttresultat = batch_kontantstrom["akkumulert_kontantstrom_kr"].iloc[-1]
+            batch_forhold_pct = (batch_sluttresultat / abs(batch_bunn_verdi) * 100) if batch_bunn_verdi != 0 else None
 
-        batch_kontantstrom_fmt = with_thousands(
-            batch_kontantstrom.drop(columns=["dato"]), int_cols=[],
-            float_cols=[c for c in batch_kontantstrom.columns if c not in ("uke", "dato")], float_decimals=0,
-        )
-        batch_kontantstrom_wide = batch_kontantstrom_fmt.set_index("uke").T
-        batch_kontantstrom_wide.index.name = "Felt"
-        batch_kontantstrom_wide = batch_kontantstrom_wide.rename(index=batch_kontantstrom_row_labels)
-        batch_kontantstrom_palopt_linjer = [f"Påløpt - {r['navn']} (kr)" for r in cfg.RESOURCES]
-        batch_kontantstrom_utbetalt_linjer = [f"Utbetalt - {r['navn']} (kr)" for r in cfg.RESOURCES]
-        _render_table(batch_kontantstrom_wide, fixed_label_width_px=BATCH_FELT_BREDDE_PX, highlight_groups=[
-            {"rows": batch_kontantstrom_palopt_linjer, "bg": "#fbf3e6", "text": "#9a6b2a"},
-            {"rows": batch_kontantstrom_utbetalt_linjer, "bg": "#eef1f6", "text": "#5b6b82"},
-            {"rows": ["Netto kontantstrøm (kr)", "Akkumulert kontantstrøm (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
-        ])
+            hc1, hc2, hc3, hc4 = st.columns(4)
+            hc1.metric(
+                f"Operasjonell kapital {valgt_batch} krever",
+                f"{fmt_int(abs(batch_bunn_verdi))} kr",
+                help="Det største akkumulerte kontantunderskuddet gjennom batchens levetid - hvor "
+                     "mye kapital som må være tilgjengelig for å dekke denne ene batchen helt til "
+                     "den leveres og genererer inntekt.",
+            )
+            hc2.metric(
+                "Peaker i",
+                f"{batch_bunn_uke} ({batch_bunn_dato.strftime('%b %Y')})",
+                help="Uken/måneden der batchens akkumulerte kontantstrøm når sitt laveste punkt.",
+            )
+            hc3.metric(
+                "Netto kontantstrøm / operasjonell kapital",
+                f"{fmt_float(batch_forhold_pct, 0)} %" if batch_forhold_pct is not None else "–",
+                help="Batchens totale netto kontantstrøm ved levetidens slutt, delt på den "
+                     "operasjonelle kapitalen den krevde på det verste - et mål på avkastning "
+                     "relativt til kapitalen som var bundet opp.",
+            )
+            hc4.metric(
+                "Akkumulert netto kontantstrøm mottatt",
+                f"{fmt_int(batch_sluttresultat)} kr",
+                help="Batchens akkumulerte netto kontantstrøm slik den står ved siste uke - det "
+                     "oppdretter faktisk sitter igjen med i kontanter fra denne batchen alene, "
+                     "etter at alle betalinger og innbetalinger for batchen er gjort opp.",
+            )
 
-        st.markdown("**Balanse**")
-        batch_balanse_row_labels = {
-            "uke": "Uke", "kontanter": "Kontanter (kr)", "kundefordringer": "Kundefordringer (kr)",
-            "biologisk_eiendel": "Biologisk eiendel (kr)", "sum_eiendeler": "Sum eiendeler (kr)",
-            "leverandorgjeld": "Leverandørgjeld (kr)", "opptjent_egenkapital": "Opptjent egenkapital (kr)",
-            "sum_gjeld_og_egenkapital": "Sum gjeld og egenkapital (kr)", "differanse": "Differanse (skal være 0)",
-        }
-        batch_balanse_fmt = with_thousands(
-            batch_balanse.drop(columns=["dato"]), int_cols=[],
-            float_cols=[c for c in batch_balanse.columns if c not in ("uke", "dato")], float_decimals=0,
-        )
-        batch_balanse_wide = batch_balanse_fmt.set_index("uke").T
-        batch_balanse_wide.index.name = "Felt"
-        batch_balanse_wide = batch_balanse_wide.rename(index=batch_balanse_row_labels)
-        _render_table(batch_balanse_wide, fixed_label_width_px=BATCH_FELT_BREDDE_PX, highlight_groups=[
-            {"rows": ["Sum eiendeler (kr)", "Sum gjeld og egenkapital (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
-            {"rows": ["Differanse (skal være 0)"], "bg": "#fdeaea", "text": "#a33a3a"},
-        ])
+            st.markdown("**Kontantstrøm**")
+            st.caption(
+                "Viser den FAKTISKE kontantbevegelsen, MED betalingsutsettelse (kunder betaler 2 "
+                "uker etter levering, leverandører betales 1 uke etter at kostnaden påløper) - til "
+                "forskjell fra Resultatregnskapet over, som bruker MATCHET kostnad (alt bokføres i "
+                "leveringsuken). Hver kostnadslinje (0-12) er spesifisert BÅDE når den påløper OG "
+                "når den faktisk betales, slik at hele bildet kan gås gjennom linje for linje. "
+                "'Akkumulert kontantstrøm' stemmer nøyaktig med 'Kontanter' i Balansen under."
+            )
+            batch_kontantstrom_row_labels = {"uke": "Uke", "palopt_inntekt_kr": "Påløpt inntekt (kr)"}
+            for r in cfg.RESOURCES:
+                batch_kontantstrom_row_labels[f"palopt_{r['id']}_kr"] = f"Påløpt - {r['navn']} (kr)"
+            batch_kontantstrom_row_labels["palopt_kostnad_totalt_kr"] = "Påløpt kostnad totalt (kr)"
+            batch_kontantstrom_row_labels["innbetalt_kr"] = "Innbetalt fra kunder (kr)"
+            for r in cfg.RESOURCES:
+                batch_kontantstrom_row_labels[f"utbetalt_{r['id']}_kr"] = f"Utbetalt - {r['navn']} (kr)"
+            batch_kontantstrom_row_labels["utbetalt_kostnad_totalt_kr"] = "Utbetalt til leverandører totalt (kr)"
+            batch_kontantstrom_row_labels["netto_kontantstrom_kr"] = "Netto kontantstrøm (kr)"
+            batch_kontantstrom_row_labels["akkumulert_kontantstrom_kr"] = "Akkumulert kontantstrøm (kr)"
+
+            batch_kontantstrom_fmt = with_thousands(
+                batch_kontantstrom.drop(columns=["dato"]), int_cols=[],
+                float_cols=[c for c in batch_kontantstrom.columns if c not in ("uke", "dato")], float_decimals=0,
+            )
+            batch_kontantstrom_wide = batch_kontantstrom_fmt.set_index("uke").T
+            batch_kontantstrom_wide.index.name = "Felt"
+            batch_kontantstrom_wide = batch_kontantstrom_wide.rename(index=batch_kontantstrom_row_labels)
+            batch_kontantstrom_palopt_linjer = [f"Påløpt - {r['navn']} (kr)" for r in cfg.RESOURCES]
+            batch_kontantstrom_utbetalt_linjer = [f"Utbetalt - {r['navn']} (kr)" for r in cfg.RESOURCES]
+            _render_table(batch_kontantstrom_wide, fixed_label_width_px=BATCH_FELT_BREDDE_PX, highlight_groups=[
+                {"rows": batch_kontantstrom_palopt_linjer, "bg": "#fbf3e6", "text": "#9a6b2a"},
+                {"rows": batch_kontantstrom_utbetalt_linjer, "bg": "#eef1f6", "text": "#5b6b82"},
+                {"rows": ["Netto kontantstrøm (kr)", "Akkumulert kontantstrøm (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
+            ])
+
+            st.markdown("**Balanse**")
+            batch_balanse_row_labels = {
+                "uke": "Uke", "kontanter": "Kontanter (kr)", "kundefordringer": "Kundefordringer (kr)",
+                "biologisk_eiendel": "Biologisk eiendel (kr)", "sum_eiendeler": "Sum eiendeler (kr)",
+                "leverandorgjeld": "Leverandørgjeld (kr)", "opptjent_egenkapital": "Opptjent egenkapital (kr)",
+                "sum_gjeld_og_egenkapital": "Sum gjeld og egenkapital (kr)", "differanse": "Differanse (skal være 0)",
+            }
+            batch_balanse_fmt = with_thousands(
+                batch_balanse.drop(columns=["dato"]), int_cols=[],
+                float_cols=[c for c in batch_balanse.columns if c not in ("uke", "dato")], float_decimals=0,
+            )
+            batch_balanse_wide = batch_balanse_fmt.set_index("uke").T
+            batch_balanse_wide.index.name = "Felt"
+            batch_balanse_wide = batch_balanse_wide.rename(index=batch_balanse_row_labels)
+            _render_table(batch_balanse_wide, fixed_label_width_px=BATCH_FELT_BREDDE_PX, highlight_groups=[
+                {"rows": ["Sum eiendeler (kr)", "Sum gjeld og egenkapital (kr)"], "bg": "#eef7ee", "text": "#3d7a3d"},
+                {"rows": ["Differanse (skal være 0)"], "bg": "#fdeaea", "text": "#a33a3a"},
+            ])
 
 # ----------------------------------------------------------------------
 # KONSOLIDERT KONTANTSTRØM - hele anlegget, summert på tvers av ALLE
@@ -3408,7 +3887,10 @@ if visning == "Batchoversikt":
 # over hele kalendertiden (nullstilles IKKE per kohort, i motsetning til
 # batch-visningene over) - det er nettopp poenget med "konsolidert".
 # ----------------------------------------------------------------------
-with st.expander("13.2 Oppankring - nedbetalingsplan (renter og avdrag per måned)", expanded=False):
+with st.expander("13.2 Oppankring - nedbetalingsplan (renter og avdrag per måned)", expanded=False) if not landanlegg else st.container():
+  if landanlegg:
+    pass
+  else:
     st.caption(
         "Dette er utleiers (Aqualoop, SFaaS-leverandørens) EGET lån, ikke oppdretterens - vist her kun "
         "for innsyn i hvordan terminbeløpet oppdretter betaler er bygget opp. For oppdretter "
@@ -3552,6 +4034,43 @@ if kons_period_labels is not None:
 kons_wide = kons_formatted.set_index("periode").T
 kons_wide.index.name = "Felt"
 kons_wide = kons_wide.rename(index=kons_row_labels)
+if landanlegg:
+    # Enhetskostnad per FISK: 0. Rogn/vaksine/yngel per stk innsatt (30 g), og variabel
+    # kostnad, faste kostnader og totalkostnad per stk LEVERT (750 g). Regnes fra
+    # ledgeren (stk inn) og kohortene (stk levert) per samme periode som tabellen.
+    _led = ledger.copy()
+    _led["_dato"] = pd.to_datetime(_led["dato"])
+    if kons_period == "uke":
+        _led["periode"] = _led["uke"]
+    elif kons_period == "maned":
+        _led["periode"] = _led["_dato"].dt.strftime("%Y-%m")
+    else:
+        _led["periode"] = _led["_dato"].dt.isocalendar().year
+    _inn = _led.groupby("periode")[["mengde_smolt", "kr_smolt"]].sum()
+    _lev = {}
+    for _gid, _info in generations.items():
+        for _b in _info["batches"]:
+            _lbl, _d = week_label(_b["delivery_week"], cfg.START_ISO_YEAR, cfg.START_ISO_WEEK)
+            _p = _lbl if kons_period == "uke" else (pd.Timestamp(_d).strftime("%Y-%m") if kons_period == "maned" else pd.Timestamp(_d).isocalendar()[0])
+            _lev[_p] = _lev.get(_p, 0.0) + _b["delivered_count"]
+    _stk_rader = {}
+    for _p in kons_periode_raw_order:
+        _n_inn = float(_inn["mengde_smolt"].get(_p, 0.0)); _kr_inn = float(_inn["kr_smolt"].get(_p, 0.0))
+        _n_ut = float(_lev.get(_p, 0.0))
+        _rad = kons.set_index("periode").loc[_p]
+        _stk_rader.setdefault("0. Rogn, vaksine og yngel per stk innsatt (kr/stk, 30 g)", []).append(fmt_float(_kr_inn / _n_inn, 2) if _n_inn else "")
+        _stk_rader.setdefault("Variabel kostnad per stk levert (kr/stk, 750 g)", []).append(fmt_float(_rad["kostnad_variabel_totalt_kr"] / _n_ut, 2) if _n_ut else "")
+        _stk_rader.setdefault("Faste kostnader per stk levert (kr/stk)", []).append(fmt_float(_rad["kr_faste_totalt"] / _n_ut, 2) if _n_ut else "")
+        _stk_rader.setdefault("Kostnad totalt per stk levert (kr/stk)", []).append(fmt_float(_rad["kostnad_totalt_konsolidert_kr"] / _n_ut, 2) if _n_ut else "")
+        _stk_rader.setdefault("Inntekt per stk levert (kr/stk)", []).append(fmt_float(_rad["inntekt_kr"] / _n_ut, 2) if _n_ut else "")
+        _stk_rader.setdefault("Antall levert (stk)", []).append(fmt_int(_n_ut) if _n_ut else "")
+    _stk_df = pd.DataFrame(_stk_rader, index=list(kons_wide.columns)).T
+    _stk_df.index.name = "Felt"
+    # Sett inn: rogn-raden rett under "0. ... per solgt kg", resten nederst
+    _pos = list(kons_wide.index).index("0. Rogn, vaksine og yngel (30 g) per solgt kg (WFE)") + 1 if "0. Rogn, vaksine og yngel (30 g) per solgt kg (WFE)" in kons_wide.index else len(kons_wide)
+    _top = kons_wide.iloc[:_pos]; _bot = kons_wide.iloc[_pos:]
+    kons_wide = pd.concat([_top, _stk_df.iloc[[0]], _bot, _stk_df.iloc[1:]])
+    per_kg_radnavn = per_kg_radnavn + list(_stk_df.index)
 kons_sublinje_labels = [f"{sl['navn']} (kr)" for sl in cfg.HEXACAGE_LEIE_SUBLINJER]
 # Felles, FAST bredde på "Felt"-kolonnen OG hver datakolonne (år/måned/uke) -
 # delt med Resultatregnskap og Balanse lenger ned, slik at samme periode
@@ -3640,7 +4159,7 @@ resultat_row_labels = {
     "varekostnad_kr": "Varekostnad (kr)",
     "bruttofortjeneste_kr": "Bruttofortjeneste (kr)",
     "lonnskostnader_kr": "Lønnskostnader (kr)",
-    "andre_driftskostnader_kr": "Big Dipper leie, infrastrukturkostnader 13.1-13.10 (kr)",
+    "andre_driftskostnader_kr": ("13. Anleggskostnader, eget anlegg (13.1-13.6) (kr)" if landanlegg else "Big Dipper leie, infrastrukturkostnader 13.1-13.10 (kr)"),
     "ebitda_kr": "EBITDA (kr)",
     "avskrivninger_kr": "Avskrivninger (kr)",
     "ebit_kr": "EBIT (kr)",
@@ -3658,7 +4177,7 @@ for sl in cfg.HEXACAGE_LEIE_SUBLINJER:          # 13.x - leie av Big Dipper, spe
 for fc in cfg.FIXED_COSTS:                      # 14, 15, 16
     if fc["id"] != "leie_anlegg":
         resultat_row_labels[f"kr_{fc['id']}"] = f"{fc['navn']} (kr)"
-resultat_kontroll_radnavn = ["Big Dipper leie, infrastrukturkostnader 13.1-13.10 (kr)"]
+resultat_kontroll_radnavn = [resultat_row_labels["andre_driftskostnader_kr"]]
 resultat_per_kg_kolonner = [c for c in resultat.columns if c.endswith("__per_kg_solgt")]
 for kol in resultat_per_kg_kolonner:
     mor_kol = kol.removesuffix("__per_kg_solgt")
@@ -3682,6 +4201,23 @@ if resultat_period_labels is not None:
 resultat_wide = resultat_formatted.set_index("periode").T
 resultat_wide.index.name = "Felt"
 resultat_wide = resultat_wide.rename(index=resultat_row_labels)
+if konsolidert and resultat_period == "ar":
+    # EBITDA-yield-rader rett under EBITDA: løpende EBITDA / INITIELL sum sources & uses
+    # (CAPEX + operasjonelt kapitalbehov, år 1) og / INITIELL CAPEX. Fra og med år 2.
+    _y_uses = float(capex) + float(ek_operasjonelt_kr)
+    _y_capex = float(capex)
+    _ar_liste = [int(p) for p in resultat_periode_raw_order]
+    _ar0 = min(_ar_liste)
+    _ebitda_serie = resultat.set_index("periode")["ebitda_kr"]
+    _r1 = {str(p): (fmt_float(float(_ebitda_serie[p]) / _y_uses * 100, 1) + " %" if int(p) > _ar0 and _y_uses else "") for p in resultat_periode_raw_order}
+    _r2 = {str(p): (fmt_float(float(_ebitda_serie[p]) / _y_capex * 100, 1) + " %" if int(p) > _ar0 and _y_capex else "") for p in resultat_periode_raw_order}
+    _y_df = pd.DataFrame([_r1, _r2], index=[f"EBITDA-yield på total kapital (sources & uses {_ar0}: {fmt_int(_y_uses / 1e6)} MNOK)",
+                                             f"EBITDA-yield på CAPEX ({_ar0}: {fmt_int(_y_capex / 1e6)} MNOK)"])
+    _y_df.columns = resultat_wide.columns
+    _y_df.index.name = "Felt"
+    _epos = list(resultat_wide.index).index("EBITDA per solgt kg (WFE)") + 1 if "EBITDA per solgt kg (WFE)" in resultat_wide.index else (
+        list(resultat_wide.index).index("EBITDA (kr)") + 1 if "EBITDA (kr)" in resultat_wide.index else len(resultat_wide))
+    resultat_wide = pd.concat([resultat_wide.iloc[:_epos], _y_df, resultat_wide.iloc[_epos:]])
 
 # ---- Batch-nedtrekk for Driftsinntekter, Varekostnad, Bruttofortjeneste og
 # Lønnskostnader - IKKE Andre driftskostnader eller Årsresultat (disse
@@ -3929,6 +4465,58 @@ _ek_tilbakebetaling_graf(_op_dates, list(_bal_m["kontanter"].values), _op_terskl
 st.subheader("Nåverdi (DCF) - oppdretters kontantstrøm, totalkapitalmodellen")
 _dcf_res = build_resultatregnskap(cfg, cashflow, fixed_costs_weekly, matchet_kostnad,
                                   cfg.START_ISO_YEAR, cfg.START_ISO_WEEK, "ar").set_index("periode")
+
+
+def _ebitda_yield_tabell(ebitda_per_ar: dict, grunnlag: dict, tittel: str, forklaring: str):
+    """EBITDA-yield fra og med år 2: løpende EBITDA delt på INITIELLE størrelser
+    (år 1) - sources & uses totalt og CAPEX. Nevneren holdes fast, så yielden
+    viser hvor mye den opprinnelige investeringen kaster av seg år for år."""
+    _ar = sorted(int(y) for y in ebitda_per_ar)
+    if len(_ar) < 2:
+        return
+    _ar2 = _ar[1:]
+    rows = {"EBITDA (kr)": [fmt_int(ebitda_per_ar[y]) for y in _ar2]}
+    for navn, belop in grunnlag.items():
+        rows[f"{navn} - initiell, år {_ar[0]} (kr)"] = [fmt_int(belop)] * len(_ar2)
+        rows[f"EBITDA-yield på {navn.lower()}"] = [fmt_float(ebitda_per_ar[y] / belop * 100, 1) + " %" if belop else "" for y in _ar2]
+    df = pd.DataFrame(rows, index=[str(y) for y in _ar2]).T
+    df.index.name = "Felt"
+    st.markdown(f"**{tittel}**")
+    st.caption(forklaring)
+    _render_table(df, highlight_groups=[{"rows": [r for r in df.index if r.startswith("EBITDA-yield")], "bg": "#fbf3e6", "text": "#9a6b2a"}],
+                  fixed_label_width_px=KONSOLIDERT_FELT_BREDDE_PX + 160, fixed_data_col_width_px=KONSOLIDERT_KOL_BREDDE_PX)
+
+
+if konsolidert:
+    # ---- Gjeldsnøkkeltall: LTV på CAPEX og NIBD/EBITDA i første fulle driftsår ----
+    _ltv = (_ik_lan / _ik_capex) if _ik_capex else 0.0
+    _ar_full = sorted(int(y) for y in _dcf_res.index)
+    _ar1 = _ar_full[1] if len(_ar_full) > 1 else _ar_full[0]     # år 2 = første år med full drift/levering
+    _ebitda_ar1 = float(_dcf_res.loc[_ar1, "ebitda_kr"])
+    _bal_tmp = balanse.copy()
+    _bal_tmp["_ar"] = pd.to_datetime(_bal_tmp["dato"]).dt.isocalendar().year
+    _bal_tmp = _bal_tmp.groupby("_ar").last()
+    _bal_ar1 = _bal_tmp.loc[_ar1] if _ar1 in _bal_tmp.index else None
+    _nibd_ar1 = float(_bal_ar1["banklan"] - _bal_ar1["kontanter"]) if _bal_ar1 is not None else _ik_lan
+    _nibd_start = float(_ik_lan)
+    st.markdown("**Gjeldsnøkkeltall - implisitt i finansieringen**")
+    _g1, _g2, _g3, _g4 = st.columns(4)
+    _g1.metric("LTV på CAPEX (banklån / CAPEX)", f"{_ltv * 100:.0f} %", help=f"{fmt_int(_ik_lan)} / {fmt_int(_ik_capex)}")
+    _g2.metric(f"EBITDA første fulle år ({_ar1})", f"{fmt_int(_ebitda_ar1 / 1e6)} MNOK")
+    _g3.metric(f"NIBD ved utgangen av {_ar1}", f"{fmt_int(_nibd_ar1 / 1e6)} MNOK",
+               help="Banklån minus kontanter i balansen ved årets slutt (etter første års avdrag).")
+    _g4.metric(f"NIBD / EBITDA ({_ar1})", f"{_nibd_ar1 / _ebitda_ar1:.1f}x" if _ebitda_ar1 > 0 else "n/a",
+               help=f"Med lånet ved opptak ({fmt_int(_nibd_start / 1e6)} MNOK) i telleren: {_nibd_start / _ebitda_ar1:.1f}x" if _ebitda_ar1 > 0 else "")
+    st.caption(f"Bankers vanlige rammer for oppdrett/RAS: LTV 50-60 % og NIBD/EBITDA under 3-4x ved full drift. "
+               f"{'Her ligger NIBD/EBITDA på ' + format(_nibd_ar1 / _ebitda_ar1, '.1f') + 'x - det forklarer hvorfor én ABD ikke bærer lånet uten høyere pris eller Fase I.B.' if landanlegg and _ebitda_ar1 > 0 and _nibd_ar1 / _ebitda_ar1 > 4 else ''}")
+    _y_grunnlag = {"Total kapital (sum sources & uses)": _ik_uses, "CAPEX": _ik_capex}
+    _ebitda_yield_tabell(
+        {int(y): float(v) for y, v in _dcf_res["ebitda_kr"].items()}, _y_grunnlag,
+        "EBITDA-yield på initiell kapital (oppdretter)" if not landanlegg else "EBITDA-yield på initiell kapital (landanlegget)",
+        f"Løpende EBITDA per år fra og med år 2, delt på det som ble investert år {int(cfg.START_ISO_YEAR)}: sum sources & uses "
+        f"({fmt_int(_ik_uses)} kr = CAPEX + operasjonelt kapitalbehov) og CAPEX alene ({fmt_int(_ik_capex)} kr). "
+        "Nevneren holdes fast på de initielle beløpene; telleren er årets faktiske EBITDA. Siste år i horisonten er et utfasingsår.",
+    )
 _dcf_bal = balanse.copy()
 _dcf_bal["_ar"] = pd.to_datetime(_dcf_bal["dato"]).dt.isocalendar().year
 _dcf_bal = _dcf_bal.groupby("_ar").last()
@@ -4169,6 +4757,13 @@ if not konsolidert:
         "Andel (%)": [fmt_float(r[2] * 100, 1) if r[2] != "" else "" for r in _ut_rows],
     }).set_index("Felt")
     st.markdown("**Investert kapital - sources & uses (utleier)**")
+    _ebitda_yield_tabell(
+        {int(r["periode"]): float(r["ebitda_kr"]) for _, r in utleier_regnskap["resultat"].iterrows()},
+        {"Total kapital (sum sources & uses)": _ut_uses, "CAPEX": capex},
+        "EBITDA-yield på initiell kapital (utleier, Aqualoop)",
+        f"Utleiers EBITDA (= 13.1 Kapitalleie) per år fra og med år 2, delt på initiell sum sources & uses ({fmt_int(_ut_uses)} kr) "
+        f"og initiell CAPEX ({fmt_int(capex)} kr). Med TC-reforhandling stiger yielden i reforhandlingsårene.",
+    )
     _render_table(_ut_ik_df, highlight_groups=[
         {"rows": ["USES", "SOURCES"], "bg": "#eef1f6", "text": "#5b6b82"},
         {"rows": ["Sum uses", "Sum sources"], "bg": "#eef7ee", "text": "#3d7a3d"},
