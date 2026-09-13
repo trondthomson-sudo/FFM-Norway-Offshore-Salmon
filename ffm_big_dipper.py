@@ -957,6 +957,17 @@ def _render_oppsummering():
     st.markdown("**Seks ABD-er (blokk på 100 000 tonn)**"); st.dataframe(_tab6, hide_index=True, use_container_width=True)
     st.caption(f"Alle tall i MNOK. Rigg og post-smoltanlegg: DCF (8 % / 10x og 7 % / 12x). NOS oppdretter: {_nos_mult:.0f}x EBITDA første fulle år. "
                "Konsolidert = de tre lagt sammen. To ABD-er = to identiske rigger og oppdrettsselskap (én rigg doblet) og ett post-smoltanlegg som leverer til begge.")
+    # ---- Helt nederst: dokumentasjon av lakseprisforutsetningen (ren visning, ingen
+    #      beregning, ingen justering i appen) - se prisdokumentasjon.py. Ligger sist
+    #      med vilje: verdiene først, prisdiskusjonen til slutt. ----
+    st.markdown("---")
+    try:
+        from prisdokumentasjon import tegn_prisdokumentasjon as _tegn_pris
+        _tegn_pris(st, startpris_kr_kg=100.0, eskalering_pct=2.0,
+                   modell_startaar=int(bd_config.START_ISO_YEAR), faktisk_startaar=2030,
+                   n_aar=int(bd_config.N_YEARS_TO_RUN))
+    except Exception as _e_pris:
+        st.caption(f"Prisdokumentasjonen kunne ikke tegnes ({_e_pris}) - sjekk at prisdokumentasjon.py ligger i samme mappe.")
 
 
 _hovedomrade = st.container()   # brukes av Oppsummering for å tegne i hovedområdet fra sidepanel-konteksten
