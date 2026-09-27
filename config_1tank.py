@@ -88,13 +88,17 @@ TANK_STAGGER_WEEKS = 8               # brukes kun ved innsettmønster "Fast anta
 # (BEKREFTET av bruker). Appen bytter automatisk når "Kakestykker" endres:
 #  - SKYVESKOTT: 6 fleksible kakestykker à 83 333 m3 (500 000 m3), 850 000
 #    fisk per kohort - tetthetstaket gjelder anlegget samlet.
-#  - FASTE SKOTT: 8 låste kakestykker à 62 500 m3 (500 000 m3). Smoltantallet
-#    per tank er KALIBRERT slik at hver kohort holder seg under 25 kg/m3 i
-#    sitt eget skott hele veien (topp 24,7-24,8 kg/m3, 1 % margin) - ulikt
-#    per tank fordi vekstsesongen er ulik.
+#  - FASTE SKOTT: 8 låste kakestykker à 62 500 m3 (500 000 m3), 6 INNSETT PER
+#    ÅR (første mandag i jan/mar/mai/jul/sep/nov - BEKREFTET av bruker
+#    26.09.2026). Hver kohort starter i ett skott og SPLITTES (halvparten av
+#    fisken) til et ledig skott når den når 25 kg/m3; slakting tas fra det
+#    nye skottet først. Smoltantallet per innsett er MAKSIMERT (se
+#    skott_allokering.optimaliser_smolt): høyest levert biomasse per år med
+#    <= 25 kg/m3 i hvert skott (1 % margin), aldri mer enn 8 skott i bruk,
+#    og hvert innsett fyller minst sitt eget skott. "n_tanks" = innsett/år.
 SKYVESKOTT_DEFAULTS = {"n_tanks": 6, "tank_volume_m3": 83_333, "smolt": [850_000] * 6}
-FASTE_SKOTT_DEFAULTS = {"n_tanks": 8, "tank_volume_m3": 62_500,
-                        "smolt": [418_000, 402_000, 399_000, 399_000, 406_000, 431_000, 452_000, 432_000]}
+FASTE_SKOTT_DEFAULTS = {"n_tanks": 6, "n_skott": 8, "splitt": True, "tank_volume_m3": 62_500,
+                        "smolt": [772_000, 698_000, 404_000, 539_000, 819_000, 443_000]}
 # Default innsettmønster i appen: "Annenhver måned" - første mandag i jan,
 # mar, mai, jul, sep, nov (BEKREFTET av bruker, gir rene månedsgrenser i
 # kakediagrammene). Appen regner ut TANK_START_WEEK_OFFSETS fra startåret;

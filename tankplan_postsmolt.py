@@ -241,6 +241,11 @@ def tegn_tankbruk(cfg, generations, cohorts, meta, tanks, uke_dato, kohorter: li
     return fig
 
 
+def _mellomrom(x) -> str:
+    """Heltall med mellomrom som tusenskille (norsk)."""
+    return f"{x:,.0f}".replace(",", " ")
+
+
 def tegn_anlegg_maanedlig(cfg, generations, cohorts, meta, tanks, uke_dato, n_maaneder: int = 24,
                           start_uke: int | None = None):
     """Motstykket til Big Dipper sine kakediagrammer: anlegget ved slutten av
@@ -250,6 +255,7 @@ def tegn_anlegg_maanedlig(cfg, generations, cohorts, meta, tanks, uke_dato, n_ma
     halls, tot_w, maks_h = _hall_layout(meta, getattr(cfg, "RESERVERTE_KAR", None))
     order = [gid for gid, _ in sorted(generations.items(), key=lambda kv: kv[1]["start_week"])]
     farge = {gid: PALETT[i % len(PALETT)] for i, gid in enumerate(order)}
+    coh = {c.id: c for c in cohorts}
     n_weeks = len(uke_dato)
     w0 = start_uke if start_uke is not None else min(info["start_week"] for info in generations.values())
     # siste uke i hver måned fra w0
@@ -271,16 +277,37 @@ def tegn_anlegg_maanedlig(cfg, generations, cohorts, meta, tanks, uke_dato, n_ma
             return farge.get(gid, ("#ccc", "#eee"))[1], "#555"
         return farge.get(v, ("#ccc", "#eee"))[0], "white"
 
+    def _linjer(w):
+        """Én linje per kohort i anlegget: antall fisk, snittvekt, biomasse og
+        kar (stående bestand ved månedens slutt, etter ukens levering)."""
+        ut = []
+        for gid in order:
+            c, info = coh.get(gid), generations[gid]
+            i = w - info["start_week"]
+            if c is None or not (0 <= i < len(c.weekly_weight_kg)):
+                continue
+            navn = gid.split("-")[1] if "-" in gid else gid
+            ant = c.weekly_standing_count[i] if c.weekly_standing_count else c.weekly_count_alive[i]
+            kb = info.get("kar_behov_per_uke", [])
+            kar = f" · {kb[i]} kar" if i < len(kb) else ""
+            ut.append(f"{navn}: {_mellomrom(ant):>9} stk · {_mellomrom(c.weekly_weight_kg[i] * 1000):>5} g · "
+                      f"{_mellomrom(c.weekly_standing_biomass_kg[i] / 1000):>4} t{kar}")
+        return ut
+
+    maks_linjer = max((len(_linjer(w)) for w in snaps), default=0)
     cols = 3 if n_maaneder > 6 else n_maaneder
     rows = math.ceil(len(snaps) / cols)
     panel_w = 7.4
-    panel_h = panel_w * (maks_h + 2.5) / tot_w + 0.9
+    _enh_per_tomme = tot_w / panel_w                       # dataenheter per tomme (aspect = equal)
+    _linje_h = 8.5 * 1.3 / 72 * _enh_per_tomme            # høyde på én tekstlinje i dataenheter
+    y_bunn = -1.6 - _linje_h * maks_linjer
+    panel_h = panel_w * (maks_h + 0.9 - y_bunn) / tot_w + 0.9
     fig, axes = plt.subplots(rows, cols, figsize=(panel_w * cols, panel_h * rows))
     axes = [axes] if len(snaps) == 1 else list(axes.flatten())
     mnd = ["Jan", "Feb", "Mar", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Des"]
     for ax, w in zip(axes, snaps):
         ax.set_xlim(0, tot_w)
-        ax.set_ylim(-1.6, maks_h + 0.9)
+        ax.set_ylim(y_bunn, maks_h + 0.9)
         ax.set_aspect("equal")
         ax.axis("off")
         bruk = []
@@ -303,7 +330,10 @@ def tegn_anlegg_maanedlig(cfg, generations, cohorts, meta, tanks, uke_dato, n_ma
                 ax.text(cx, cy, str(i + 1), ha="center", va="center", fontsize=6.5, color=tc)
             bruk.append(f"{h['navn'].split(' (')[0][:10]} {i_bruk}/{h['n_aktiv']}")
         d = uke_dato[w]
+        linjer = _linjer(w)
         ax.set_title(f"{mnd[d.month - 1]} {d.year} · " + " · ".join(bruk), fontsize=11, fontweight="bold", loc="left")
+        if linjer:
+            ax.text(0.5, -1.1, "\n".join(linjer), fontsize=8.5, va="top", ha="left", family="monospace")
     for ax in axes[len(snaps):]:
         ax.axis("off")
     aktive = [gid for gid in order if any(tanks[t][w] in (gid, f"({gid}) vask") for t in tanks for w in snaps)]

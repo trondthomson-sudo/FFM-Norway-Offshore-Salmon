@@ -26,12 +26,14 @@ default_config = bd_config   # byttes til postsmolt_config når visning "Post-sm
 from growth_tables import GrowthTables
 from scheduler_1tank import build_1tank_schedule, week_label, monday_of_week
 from scheduler_multitank import build_multitank_schedule
+from skott_allokering import alloker_skott, optimaliser_smolt
 from scheduler_postsmolt import build_postsmolt_schedule, trinn_sammendrag
 from tankplan_postsmolt import tildel_kar, kohortplan_tabell, tegn_tankbruk, tegn_anlegg_maanedlig, tegn_anleggskart
 
 # Postsmolt-visningen er midlertidig skjult for investorpresentasjoner
 # (bekreftet av bruker). All kode beholdes - sett True for å vise den igjen.
 LANDANLEGG_VALG = "Post-smolt landanlegg"
+STRATEGI_VALG = "Produksjonsstrategi"          # oversikt/flytdiagram: landanlegg -> Big Dipper -> slakt (produksjonsstrategi.py)
 OPPSUMMERING_VALG = "Oppsummering (1 ABD)"   # fjerde visning: samlet figur EV / CAPEX / NPV / EK-verdi for alle selskaper, regnet i bakgrunnen   # tredje visning: post-smolt-leverandørens eget landanlegg (se config_postsmolt.py)
 from resource_ledger import (
     build_resource_ledger, summarize_by_cohort, summarize_by_month, summarize_by_year,
@@ -686,7 +688,7 @@ def _render_expandable_kontantstrom(wide_df: pd.DataFrame, highlight_groups: lis
 
 
 st.set_page_config(page_title="Norway Offshore Salmon", layout="wide")
-if st.session_state.get("produkttype_valg", OPPSUMMERING_VALG) != OPPSUMMERING_VALG:
+if st.session_state.get("produkttype_valg", OPPSUMMERING_VALG) not in (OPPSUMMERING_VALG, STRATEGI_VALG):
     st.title("Post-smolt landanlegg - leveranse til Big Dipper" if st.session_state.get("produkttype_valg") == LANDANLEGG_VALG
              else "Norway Offshore Salmon" + (" - Konsolidert (Aqualoop + NOS)" if st.session_state.get("produkttype_valg") == "Konsolidert" else ""))
     st.caption(
@@ -731,6 +733,96 @@ if st.session_state.get("produkttype_valg", OPPSUMMERING_VALG) != OPPSUMMERING_V
 # selskap, i SFaaS-struktur og fullt konsolidert. Post-smolt fra eget anlegg
 # (Fase I.A) til 100 kr/kg (config). Resultatene mellomlagres (st.cache_data).
 # ============================================================================
+def _render_strategi():
+    """Produksjonsstrategien for noen som ser den for første gang: flytdiagram,
+    tidslinje og tabeller per kohort. Standardforutsetningene i modellen
+    (skyveskott i Big Dipper, valgt anleggsdesign på land)."""
+    import produksjonsstrategi as _ps
+
+    _designs_s = list(getattr(postsmolt_config, "ANLEGG_DESIGN", {}).keys())
+    _std = getattr(postsmolt_config, "DEFAULT_ANLEGG_DESIGN", _designs_s[0] if _designs_s else None)
+    with st.sidebar:
+        st.header("Produksjonsstrategi")
+        _des = st.selectbox("Landanlegg (design)", options=_designs_s,
+                            index=_designs_s.index(_std) if _std in _designs_s else 0, key="strategi_design",
+                            help="Styrer karpoolene på land og antall ABD-er landanlegget leverer til.")
+        _ar = int(st.number_input("Leveranseår (fisk som går i sjø)", min_value=2026, max_value=2036, value=2026,
+                                  step=1, key="strategi_ar"))
+        st.caption("Viser modellens standardforutsetninger: skyveskott i Big Dipper (6 x 83 333 m³, 850 000 "
+                   "smolt à 750 g per kohort, 50 uker, 8 ukers slakting) og landanlegget fra 30 g til levering.")
+
+    @st.cache_data(show_spinner="Regner ut produksjonsstrategien ...")
+    def _beregn(design, ar, _fp):
+        return _ps.beregn_strategi(design_navn=design, leveranse_ar=ar)
+
+    _fp = "".join(str(os.path.getmtime(f)) for f in ("produksjonsstrategi.py", "config_1tank.py", "config_postsmolt.py",
+                                                     "scheduler_postsmolt.py", "scheduler_multitank.py") if os.path.exists(f))
+    res = _beregn(_des, _ar, _fp)
+
+    st.title("Produksjonsstrategien – fra 30 g på land til slakt i Big Dipper")
+    _land, _sjo = res["land"], res["sjo"]
+    _mean = lambda xs: sum(xs) / len(xs) if xs else 0.0
+    st.markdown(
+        f"Fisken settes inn i **landanlegget** som yngel på **30 g**, vokser gjennom tre haller (yngel, smolt, "
+        f"post-smolt) i **{res['vekstuker_land']} uker** og flyttes med brønnbåt til **Big Dipper** ved "
+        f"**ca. {fmt_int(_mean([k['vekt_ut_g'] for k in _land]))} g**. Der vokser den i "
+        f"**{fmt_int(_mean([k['uker'] for k in _sjo]))} uker** og slaktes ut batchvis de siste "
+        f"**{fmt_int(_mean([k['salgsvindu_uker'] for k in _sjo]))} ukene**. Det settes inn "
+        f"**{len(_sjo)} kohorter per år** i Big Dipper – første mandag i januar, mars, mai, juli, september og november."
+    )
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Yngel inn på land per år", fmt_int(sum(k["antall_inn"] for k in _land)))
+    c2.metric("Smolt ut i sjø per år", fmt_int(sum(k["antall_ut"] for k in _land)))
+    _nabd = int(res["n_abd"])
+    _abd_txt = f" ({_nabd} ABD)" if _nabd > 1 else ""
+    c3.metric(f"Fisk slaktet per runde ({len(_sjo)} kohorter)" + _abd_txt, fmt_int(_nabd * sum(k["antall_slaktet"] for k in _sjo)))
+    c4.metric(f"Levert per kalenderår ({res['kalenderar']})" + _abd_txt, f"{fmt_int(_nabd * res['hog_kalenderar_t'])} t HOG",
+              help=f"Samme tall som massebalansen i SFaaS. Én runde med {len(_sjo)} kohorter gir "
+                   f"{fmt_int(_nabd * sum(k['levert_t_hog'] for k in _sjo))} t HOG; med {res['syklus_uker']} ukers syklus "
+                   "slaktes det litt mer enn 6 kohorter per kalenderår - se boksen i flytdiagrammet.")
+    c5.metric("Fra 30 g til slakt", f"ca. {fmt_int(res['vekstuker_land'] + _mean([k['uker'] for k in _sjo]))} uker")
+
+    # Forklaring på per runde vs. per kalenderår - rett under nøkkeltallene
+    _k_tittel, _k_tekst = _ps.kommentar_kalenderar(res, linjeskift=False)
+    st.markdown(
+        f"<div style='background:#fff6d6;border:1px solid #d4a017;border-radius:8px;padding:10px 16px;"
+        f"margin:6px 0 14px 0;color:#3d3000;font-size:0.92rem;line-height:1.45'>"
+        f"<b style='color:#5a4300'>{_k_tittel}</b><br>{_k_tekst}</div>", unsafe_allow_html=True)
+
+    st.subheader("1. Flytdiagram – én kohort gjennom verdikjeden")
+    _f1 = _ps.tegn_flytdiagram(res)
+    st.pyplot(_f1, use_container_width=True)
+    plt.close(_f1)
+    _f1 = _ps.tegn_flytdiagram(res, med_kommentar=True)   # nedlastet PNG har forklaringen med i figuren
+    _b1 = io.BytesIO(); _f1.savefig(_b1, format="png", dpi=150, bbox_inches="tight"); plt.close(_f1)
+    st.download_button("Last ned flytdiagrammet (PNG)", data=_b1.getvalue(), file_name="produksjonsstrategi_flytdiagram.png",
+                       mime="image/png", key="strategi_dl1")
+
+    st.subheader(f"2. Tidslinje – årets {len(_sjo)} kohorter")
+    st.caption("Hver rad er én kohort: blå = trinnene på land, grønn = vekst i Big Dipper, rød = slakting. "
+               "Tallene til venstre er innsett på land, i den grønne linjen innsett i sjø og til høyre det som slaktes.")
+    _f2 = _ps.tegn_tidslinje(res)
+    st.pyplot(_f2, use_container_width=True)
+    _b2 = io.BytesIO(); _f2.savefig(_b2, format="png", dpi=150, bbox_inches="tight"); plt.close(_f2)
+    st.download_button("Last ned tidslinjen (PNG)", data=_b2.getvalue(), file_name="produksjonsstrategi_tidslinje.png",
+                       mime="image/png", key="strategi_dl2")
+
+    st.subheader("3. Landanlegget – per kohort")
+    st.caption(f"Design: {res['design']}. Kar = høyeste antall kar kohorten bruker i trinnet (et kar deles aldri "
+               "mellom kohorter). Antall inn er satt slik at det leveres ca. 850 000 fisk etter dødelighet.")
+    _tl = _ps.tabell_land(res).set_index("Kohort").T
+    _tl.index.name = "Felt"
+    st.dataframe(_tl, use_container_width=True, height=38 + 35 * len(_tl))
+
+    st.subheader("4. Big Dipper – per kohort")
+    st.caption("Skyveskott: veggene flyttes slik at hver kohort får volumet biomassen krever ved 25 kg/m³. "
+               "Snittvekt slakt er snittet over de 8 slakteukene; HOG = sløyd vekt uten hode (x "
+               f"{fmt_float(res['hog'], 3)}).")
+    _ts = _ps.tabell_sjo(res).set_index("Kohort").T
+    _ts.index.name = "Felt"
+    st.dataframe(_ts, use_container_width=True, height=38 + 35 * len(_ts))
+
+
 def _render_oppsummering():
     import subprocess, json as _json, hashlib as _hashlib
     from matplotlib.patches import Patch as _Patch
@@ -1066,6 +1158,7 @@ with st.sidebar:
                 "tank_stagger": int(getattr(bd_config, "TANK_STAGGER_WEEKS", 8)),
                 "tank_volume_m3": fmt_int(bd_config.TANK_VOLUME_M3),
                 "skott_modus": "Skyveskott (fleksible vegger)", "innsett_monster": "Jevnt fordelt over året",
+                "n_skott": int(bd_config.FASTE_SKOTT_DEFAULTS["n_skott"]), "skott_splitt": True,
                 "startaar": int(bd_config.START_ISO_YEAR), "startuke": int(bd_config.START_ISO_WEEK),
                 "hog_faktor": float(bd_config.HOG_FAKTOR),
                 "smolt_pris_modus": "Eget post-smolt-anlegg (kr/kg WFE)",   # standard: smolt kjøpes fra eget post-smolt-anlegg
@@ -1120,7 +1213,7 @@ with st.sidebar:
         # "Postsmolt 2x" er midlertidig SKJULT fra menyen (ikke slettet - all
         # kode, presets og logikk står urørt). Sett VIS_POSTSMOLT = True for å
         # ta den tilbake i menyen. Default-visning er SFaaS oppdrett.
-        "Produkttype / visning", options=[OPPSUMMERING_VALG, "SFaaS oppdrett", "Konsolidert", LANDANLEGG_VALG],
+        "Produkttype / visning", options=[OPPSUMMERING_VALG, STRATEGI_VALG, "SFaaS oppdrett", "Konsolidert", LANDANLEGG_VALG],
         index=0,   # Oppsummering er åpningssiden (bekreftet 12.09.2026)
         key="produkttype_valg", on_change=_bruk_produkttype_variant,
         help="'SFaaS oppdrett': Big Dipper slaktefisk, oppdretter (NOS) leier anlegget av Aqualoop - "
@@ -1150,6 +1243,10 @@ with st.sidebar:
         # Oppsummeringen trenger ikke resten av sidepanelet - tegn den nå og stopp.
         with _hovedomrade:
             _render_oppsummering()
+        st.stop()
+    if produkttype_valg == STRATEGI_VALG:
+        with _hovedomrade:
+            _render_strategi()
         st.stop()
 
 
@@ -1666,7 +1763,8 @@ with st.sidebar:
       # er tallet et SNITTVOLUM per kakestykke (anleggets totale volum / antall),
       # ikke en fast tankstørrelse - veggene flyttes fritt.
       _skott_er_faste = (st.session_state.get("skott_modus") == "Faste skott")
-      _n_tank_lbl = int(st.session_state.get("n_tanks", getattr(default_config, "N_TANKS", 6)))
+      _n_tank_lbl = int(st.session_state.get("n_skott", getattr(default_config, "FASTE_SKOTT_DEFAULTS", {}).get("n_skott", 8))
+                        if _skott_er_faste else st.session_state.get("n_tanks", getattr(default_config, "N_TANKS", 6)))
       _vol_lbl = parse_number(str(st.session_state.get("tank_volume_m3", "")), default=float(default_config.TANK_VOLUME_M3))
       if produkttype == "Slaktefisk" and not _skott_er_faste:
           _tank_label = f"Fleksible {_n_tank_lbl} x {fmt_int(_vol_lbl)} m³ - snittvolum per kakestykke (m³)"
@@ -1767,6 +1865,7 @@ with st.sidebar:
         st.caption(f"→ Kapasitet aktive trinn: " + ", ".join(f"{t['navn']}: {int(t['antall_kar'])} x {fmt_int(t['kar_volum_m3'])} m³"
                                                             for t in ps_trinn if t["aktiv"]))
         n_tanks, tank_stagger, tank_start_offsets, skott_faste = 1, 0, [0], False
+        n_skott, skott_splitt = 1, False
         n_batches = 1
         start_year, start_week = ps_lev_start_ar - 1, 1   # scheduleren setter faktisk uke 0 (= første innsett)
         oppskrift1_dato = monday_of_week(0, start_year, start_week)
@@ -1776,11 +1875,14 @@ with st.sidebar:
         # forskjøvet et fast antall uker per tank. Oppskrifter-i-rotasjon
         # (sekvensielt i ÉN tank) gir ikke mening her - låst til 1.
         c_t1, c_t2 = st.columns(2)
+        _faste_na = (st.session_state.get("skott_modus") == "Faste skott")
         n_tanks = int(c_t1.number_input(
-            "Antall tanker", min_value=1, max_value=8, value=int(getattr(default_config, "N_TANKS", 6)),
-            step=1, key="n_tanks",
-            help="Big Dipper har 6 vekstkar à 83 333 m³ (ca. 500 000 m³). Hver tank kjører sin egen, uavhengige "
-                 "rotasjon (vekst + vask) med oppskriften under - forskjøvet i tid per tank.",
+            "Innsett per år (kohorter)" if _faste_na else "Antall tanker", min_value=1, max_value=8,
+            value=int(getattr(default_config, "N_TANKS", 6)), step=1, key="n_tanks",
+            help=("Faste skott: antall innsett (kohorter) per år. Hvert innsett har sin egen oppskrift under, og "
+                  "kohortene fordeles på de faste skottene (se 'Antall faste skott')." if _faste_na else
+                  "Big Dipper har 6 vekstkar à 83 333 m³ (ca. 500 000 m³). Hver tank kjører sin egen, uavhengige "
+                  "rotasjon (vekst + vask) med oppskriften under - forskjøvet i tid per tank."),
         ))
         def _bytt_skott_oppsett():
             # Bytter hele oppsettet (antall tanker, tankvolum, smolt per tank)
@@ -1788,6 +1890,9 @@ with st.sidebar:
             _d = (default_config.FASTE_SKOTT_DEFAULTS if st.session_state.get("skott_modus") == "Faste skott"
                   else default_config.SKYVESKOTT_DEFAULTS)
             st.session_state["n_tanks"] = int(_d["n_tanks"])
+            if "n_skott" in _d:
+                st.session_state["n_skott"] = int(_d["n_skott"])
+                st.session_state["skott_splitt"] = bool(_d.get("splitt", True))
             st.session_state["tank_volume_m3"] = fmt_int(_d["tank_volume_m3"])
             for _i, _n in enumerate(_d["smolt"]):
                 st.session_state[f"smolt_{_i}"] = fmt_int(_n)
@@ -1796,26 +1901,41 @@ with st.sidebar:
             on_change=_bytt_skott_oppsett,
             help="'Skyveskott': veggene flyttes, hver kohort får det volumet biomassen krever ved tetthetstaket, "
                  "og kravet er at SUMMEN over alle kohorter holder seg under anleggets totale volum. "
-                 "'Faste skott': hvert kakestykke er låst til 'Tankvolum', og HVER kohort må holde seg under "
-                 "tetthetstaket i sitt eget skott hele veien. Bytte setter automatisk hele oppsettet: "
-                 "skyveskott = 6 x 83 333 m³ / 850 000 fisk; faste skott = 8 x 62 500 m³ med kalibrert "
-                 "smoltantall per tank (399 000-452 000).",
+                 "'Faste skott': skottene er låst (se 'Antall faste skott' og volum per skott), og tetthetstaket "
+                 "gjelder i HVERT skott. Antall innsett per år settes separat; en kohort kan splittes over i "
+                 "et ledig skott når den når taket. Bytte setter automatisk hele oppsettet: "
+                 "skyveskott = 6 x 83 333 m³ / 850 000 fisk; faste skott = 6 innsett/år i 8 x 62 500 m³ "
+                 "med maksimert smoltantall per innsett.",
         )
         skott_faste = (skott_modus == "Faste skott")
         if skott_faste:
-            _peak = st.session_state.get("_peak_density_per_tank")
-            _cap = float(st.session_state.get("max_density_kg_m3", default_config.MAX_DENSITY_KG_M3))
-            def _kalibrer_smolt(peak=_peak, cap=_cap):
-                # Tetthet er lineær i antall fisk -> nytt antall = dagens x tak / topp (1 % margin)
-                if not peak:
+            _fs_def = default_config.FASTE_SKOTT_DEFAULTS
+            c_s1, c_s2 = st.columns(2)
+            n_skott = int(c_s1.number_input(
+                "Antall faste skott", min_value=1, max_value=16, value=int(_fs_def.get("n_skott", 8)), step=1,
+                key="n_skott", help="Antall låste kakestykker i anlegget. Volum per skott settes under 'Tank'."))
+            skott_splitt = bool(c_s2.checkbox(
+                "Splitt til ledig skott ved taket", value=True, key="skott_splitt",
+                help="Når en kohort når tetthetstaket i sitt skott, flyttes halvparten av fisken til et ledig "
+                     "skott. Slakting tas fra det nye skottet først; når det er tomt, vaskes det og blir ledig."))
+            _opt = st.session_state.get("_skott_optimum")
+            def _maksimer_smolt(opt=_opt):
+                if not opt:
                     return
-                for _i, (_n, _pk) in enumerate(peak):
-                    if _pk and _pk > 0:
-                        st.session_state[f"smolt_{_i}"] = fmt_int(int(_n * cap / _pk * 0.99 // 1000 * 1000))
-            st.button("Kalibrer smoltantall per tank til tetthetstaket", key="kalibrer_smolt_knapp",
-                      on_click=_kalibrer_smolt, disabled=not _peak,
-                      help="Setter antall fisk i hver tank til det høyeste som holder maks tetthet under taket "
-                           "(1 % margin) - basert på forrige kjøring, så trykk igjen om du endrer noe annet.")
+                for _i, _n in enumerate(opt["smolt"]):
+                    st.session_state[f"smolt_{_i}"] = fmt_int(int(_n))
+            st.button(f"Maksimer smoltantall ({n_tanks} innsett/år i {n_skott} skott)", key="kalibrer_smolt_knapp",
+                      on_click=_maksimer_smolt, disabled=not _opt,
+                      help="Setter smoltantallet per innsett som gir høyest levert biomasse per år, med maks tetthet "
+                           "under taket i hvert skott (1 % margin) og aldri flere skott i bruk enn anlegget har. "
+                           "Hvert innsett fyller minst sitt eget skott. Basert på forrige kjøring (vekst, "
+                           "temperatur, innsettdatoer) - trykk igjen hvis du endrer noe annet.")
+            if _opt:
+                st.caption(f"→ Optimum: {', '.join(fmt_int(x) for x in _opt['smolt'])} smolt per innsett - "
+                           f"ca. {fmt_int(_opt['levert_t_per_ar'])} t WFE levert per år, maks {_opt['maks_skott']} "
+                           f"av {n_skott} skott i bruk.")
+        else:
+            n_skott, skott_splitt = n_tanks, False
         c_y, c_m = st.columns(2)
         start_year = int(c_y.number_input("Startår", min_value=2024, max_value=2040,
                                           value=int(default_config.START_ISO_YEAR), step=1, key="startaar"))
@@ -1866,6 +1986,7 @@ with st.sidebar:
                    "innsettuken 1 uke tidligere per år).")
     else:
         n_tanks, tank_stagger, tank_start_offsets, skott_faste = 1, 0, [0], False
+        n_skott, skott_splitt = 1, False
         n_batches = st.number_input("Antall oppskrifter i rotasjon", min_value=1, max_value=8,
                                      value=int(default_config.N_BATCHES_IN_ROTATION), step=1, key="n_batches")
 
@@ -2300,7 +2421,9 @@ cfg.SKATTESATS = skattesats
 cfg.N_TANKS = int(n_tanks)                 # Big Dipper multi-tank (Slaktefisk); 1 for Postsmolt
 cfg.TANK_STAGGER_WEEKS = int(tank_stagger)
 cfg.TANK_START_WEEK_OFFSETS = list(tank_start_offsets)   # globale ukeindekser for første innsett per tank
-cfg.SKOTT_FASTE = bool(skott_faste)   # True = faste kakestykker (tetthetstak per tank), False = skyveskott (anleggsnivå)
+cfg.SKOTT_FASTE = bool(skott_faste)   # True = faste kakestykker (tetthetstak per skott), False = skyveskott (anleggsnivå)
+cfg.N_SKOTT = int(n_skott)            # faste skott: antall fysiske skott (N_TANKS = innsett per år)
+cfg.SKOTT_SPLITT = bool(skott_splitt) # faste skott: splitt kohorten til et ledig skott ved tetthetstaket
 cfg.LANDANLEGG = bool(landanlegg)
 if landanlegg:
     # Leveranseplan og trinn-kapasitet - se scheduler_postsmolt.py / config_postsmolt.py
@@ -2365,12 +2488,17 @@ elif multitank:
     # se scheduler_multitank.py. Med N_TANKS = 1 er dette identisk med
     # build_1tank_schedule (samme ID-er, samme tall).
     weekly_df, generations, cohorts, meta = build_multitank_schedule(cfg, growth_tables=gt)
+    if cfg.SKOTT_FASTE and int(cfg.N_TANKS) > 1:
+        # Faste skott: fordel kohortene på de fysiske skottene (med splitting
+        # ved taket) og regn tetthet PER SKOTT - se skott_allokering.py.
+        weekly_df = alloker_skott(cfg, generations, cohorts, meta, weekly_df)
+        st.session_state["_skott_optimum"] = optimaliser_smolt(cfg, generations, cohorts)
 else:
     weekly_df, generations, cohorts, meta = build_1tank_schedule(cfg, growth_tables=gt)
 # Etikett for grupperingsdimensjonen info["batch"]: "Oppskrift N" i 1-tank-
 # rotasjon, "Tank N" når flere tanker kjører parallelt.
 n_tanker_aktiv = 1 if landanlegg else int(meta.get("n_tanks", 1))   # Landanlegg: ABD-ene er kunder, ikke tanker
-gruppe_navn = "ABD" if landanlegg else ("Tank" if n_tanker_aktiv > 1 else "Oppskrift")
+gruppe_navn = "ABD" if landanlegg else (("Innsett" if cfg.SKOTT_FASTE else "Tank") if n_tanker_aktiv > 1 else "Oppskrift")
 ledger = build_resource_ledger(cfg, cohorts, generations)
 by_cohort = summarize_by_cohort(ledger, cfg)
 by_month = summarize_by_month(ledger, cfg)
@@ -2429,6 +2557,9 @@ col1, col2, col3 = st.columns(3)
 if landanlegg:
     col1.metric("Big Dipper-enheter levert til", f"{meta['n_abd']}")
     col2.metric(f"Vekstuker {fmt_float(cfg.START_WEIGHT_KG*1000,0)} g → {fmt_float(cfg.LEVERT_VEKT_KG*1000,0)} g", f"{meta['vekstuker']} uker")
+elif n_tanker_aktiv > 1 and cfg.SKOTT_FASTE:
+    col1.metric("Innsett per år / faste skott", f"{n_tanker_aktiv} / {meta.get('n_skott', n_tanker_aktiv)}")
+    col2.metric("Skott i bruk (maks)", f"{meta.get('skott_maks_i_bruk', 0)} av {meta.get('n_skott', 0)}")
 elif n_tanker_aktiv > 1:
     col1.metric("Tanker (parallelle)", f"{n_tanker_aktiv}")
     _rot = sorted(set(meta.get("rotasjon_per_tank", [meta["full_rotasjon_uker"]])))
@@ -2567,13 +2698,21 @@ elif n_tanker_aktiv > 1 and cfg.SKOTT_FASTE:
     # ---- FASTE SKOTT: tetthetstaket gjelder PER TANK (fast volum) ----
     n_over_tak = sum(1 for info in complete_gens.values() if info.get("tetthet_over_tak"))
     _maks_tett = max(info["max_density_kg_m3"] for info in complete_gens.values())
+    _n_skott = int(meta.get("n_skott", n_tanker_aktiv))
+    _n_split = sum(1 for info in complete_gens.values() if info.get("skott_b") is not None)
+    _skott_txt = (f"{n_tanker_aktiv} innsett per år i {_n_skott} faste skott à {fmt_int(cfg.TANK_VOLUME_M3)} m³"
+                  + (f" ({_n_split} av {len(complete_gens)} kohorter splittes til et ledig skott ved taket)" if _n_split else ""))
     if n_over_tak:
-        st.warning(f"Faste skott à {fmt_int(cfg.TANK_VOLUME_M3)} m³: {n_over_tak} av {len(complete_gens)} kohorter "
-                   f"overstiger tetthetstaket ({fmt_int(max_density)} kg/m³) i sitt eget skott - høyeste "
-                   f"{_maks_tett:.1f} kg/m³. Bruk 'Kalibrer smoltantall'-knappen i sidepanelet, eller juster per tank.")
+        st.warning(f"{_skott_txt}: {n_over_tak} av {len(complete_gens)} kohorter overstiger tetthetstaket "
+                   f"({fmt_int(max_density)} kg/m³) i et skott - høyeste {_maks_tett:.1f} kg/m³. Bruk "
+                   "'Maksimer smoltantall'-knappen i sidepanelet, eller juster per innsett.")
     else:
-        st.caption(f"Faste skott à {fmt_int(cfg.TANK_VOLUME_M3)} m³: alle kohorter holder seg under tetthetstaket "
-                   f"({fmt_int(max_density)} kg/m³) i sitt eget skott - høyeste {_maks_tett:.1f} kg/m³.")
+        st.caption(f"{_skott_txt}: alle kohorter holder seg under tetthetstaket ({fmt_int(max_density)} kg/m³) "
+                   f"i hvert skott - høyeste {_maks_tett:.1f} kg/m³.")
+    if meta.get("skott_konflikt_uker"):
+        st.warning(f"For få skott: anlegget trenger opptil {meta['skott_maks_i_bruk']} skott samtidig (har {_n_skott}) "
+                   f"i {meta['skott_konflikt_uker']} uker. Kohortene som mangler plass vises som 'Skott N (MANGLER)' i "
+                   "ukekalenderen. Reduser smoltantallet ('Maksimer smoltantall'), slå av splitting eller øk antall skott.")
     m3_pool = meta["m3_pool"]
 elif n_tanker_aktiv > 1:
     # ---- FLEKSIBLE KAKESTYKKER: anleggsnivå-sjekk av m³-behov ----
@@ -2731,7 +2870,7 @@ oversikt_valg = st.selectbox(
 
 if oversikt_valg == _alle_label:
     gens_vis, ledger_vis = generations, ledger
-    _mab_tanker = n_tanker_aktiv   # MAB for hele anlegget = tak x volum x antall tanker
+    _mab_tanker = int(meta.get("n_skott", n_tanker_aktiv)) if cfg.SKOTT_FASTE else n_tanker_aktiv   # MAB for hele anlegget = tak x volum x antall tanker/skott
 else:
     _mab_tanker = 1
     valgt_n = int(oversikt_valg.split()[-1])
@@ -2854,6 +2993,10 @@ with st.expander("📋 Kohort-sammendrag (klikk for å vise)", expanded=False):
             # ikke selges. Samme prinsipp som i konsolidert kontantstrøm.
             "FCR (WFE)": round(info["overall_fcr"], 2),
             "FCR (HOG)": round(info["overall_fcr"] / cfg.HOG_FAKTOR, 2) if cfg.HOG_FAKTOR else None,
+            **({"Skott": (f"{info['skott_a']}" + (f" + {info['skott_b']}" if info.get("skott_b") else "")),
+                "Splittes (uke)": (week_label(info["split_week"], cfg.START_ISO_YEAR, cfg.START_ISO_WEEK)[0]
+                                   if info.get("split_week") is not None else "")}
+               if (n_tanker_aktiv > 1 and cfg.SKOTT_FASTE and "skott_a" in info) else {}),
             **({"Maks m³-behov (ved tak)": round(info["max_m3_behov"])} if (n_tanker_aktiv > 1 and not cfg.SKOTT_FASTE) else {
                 "Maks tetthet (kg/m³)": round(info["max_density_kg_m3"], 1),
                 "Over tak?": "Ja" if info.get("tetthet_over_tak") else "",
@@ -2958,10 +3101,11 @@ if n_tanker_aktiv > 1:
     if cfg.SKOTT_FASTE:
         st.subheader("Kubikkbruk i anlegget (faste skott)")
         st.caption(
-            f"Faste skott à {fmt_int(cfg.TANK_VOLUME_M3)} m³: hver kohort er låst til sitt eget skott, så "
-            f"'m³-behov' (biomasse / {fmt_int(max_density)} kg/m³) kan aldri overstige {fmt_int(cfg.TANK_VOLUME_M3)} m³ "
-            f"per kohort. Grafen/kakene viser hvor mye av anleggets {fmt_int(m3_pool)} m³ som faktisk er utnyttet "
-            "- resten er ubrukt volum i skottene, fordi veggene ikke kan flyttes."
+            f"{meta.get('n_skott', n_tanker_aktiv)} faste skott à {fmt_int(cfg.TANK_VOLUME_M3)} m³: hver kohort står i "
+            f"ett skott, og splittes til et ledig skott når den når {fmt_int(max_density)} kg/m³ - 'm³-behov' "
+            f"(biomasse / {fmt_int(max_density)} kg/m³) kan derfor aldri overstige volumet av skottene kohorten står i. "
+            f"Grafen/kakene viser hvor mye av anleggets {fmt_int(m3_pool)} m³ som faktisk er utnyttet - resten er "
+            "ubrukt volum i skottene, fordi veggene ikke kan flyttes."
         )
     else:
         st.subheader("Kubikkbruk i anlegget (fleksible kakestykker)")
@@ -3010,23 +3154,126 @@ if n_tanker_aktiv > 1:
     _alle_kohorter_farge = {c: _tankfarge(c) for c in m3_behov_uke.columns}
     _pie_df = m3_behov_uke.copy()
     _pie_df["_dato"] = pd.to_datetime([weekly_df.loc["Dato", lbl] for lbl in _pie_df.index]) + pd.Timedelta(days=3)
+    _pie_df["_wk"] = range(len(_pie_df))
     _pie_df = _pie_df[_pie_df["_dato"].dt.year.isin(_pie_ar)]
     _pie_df["_ar"], _pie_df["_mnd"] = _pie_df["_dato"].dt.year, _pie_df["_dato"].dt.month
     _pie_slutt = _pie_df.groupby(["_ar", "_mnd"]).last().drop(columns=["_dato"])
+    _pie_uke = _pie_slutt.pop("_wk")
     if cfg.SKOTT_FASTE:
         st.caption(
-            f"Kakestykkene måned for måned ({_pie_ar[0]}-{_pie_ar[-1]}): {n_tanker_aktiv} FASTE skott à "
+            f"Kakestykkene måned for måned ({_pie_ar[0]}-{_pie_ar[-1]}): {meta.get('n_skott', n_tanker_aktiv)} FASTE skott à "
             f"{fmt_int(cfg.TANK_VOLUME_M3)} m³ (svarte streker). Farget del = kohortens m³-behov ved "
             f"{fmt_int(max_density)} kg/m³ ved månedens slutt, hvit del = ubrukt volum i det skottet. Prosenten i "
-            "tittelen er samlet utnyttelse av anlegget."
+            "tittelen er samlet utnyttelse av anlegget. Hvert kakestykke viser også antall fisk, snittvekt (g) og biomasse (t) i "
+            "kohorten ved månedens slutt (etter ukens salg)."
         )
     else:
         st.caption(
             f"Kakestykkene måned for måned ({_pie_ar[0]}-{_pie_ar[-1]}): hver kohorts andel av anleggets "
             f"{fmt_int(m3_pool)} m³ ved månedens slutt, hvit del = ledig kapasitet. Viser hvor mye veggene må "
-            "flyttes fra måned til måned."
+            "flyttes fra måned til måned. Hvert kakestykke viser også antall fisk, snittvekt (g) og biomasse (t) i "
+            "kohorten ved månedens slutt (etter ukens salg)."
         )
-    fig_pie, axes = plt.subplots(len(_pie_ar) * 2, 6, figsize=(20, 7.0 * len(_pie_ar)))
+    # Status per kohort ved månedsslutt: antall fisk, snittvekt og biomasse
+    # (stående, dvs. etter ukens salg) - vises på hvert kakestykke.
+    _koh_by_id = {_c.id: _c for _c in cohorts}
+
+    def _koh_status(cid, wk, biomasse_kg=None):
+        """(antall, vekt_g, biomasse_t) for kohort cid i global uke wk. Med
+        biomasse_kg gitt (faste skott: biomassen i ETT skott) regnes antallet
+        ut fra snittvekten."""
+        _c = _koh_by_id.get(str(cid))
+        if _c is None:
+            return None
+        _i = int(wk) - _c.start_week
+        if not (0 <= _i < _c.n_weeks):
+            return None
+        _vekt = float(_c.weekly_weight_kg[_i])
+        _bio = float(_c.weekly_standing_biomass_kg[_i]) if biomasse_kg is None else float(biomasse_kg)
+        _ant = _bio / _vekt if _vekt > 0 else 0.0
+        return _ant, _vekt * 1000, _bio / 1000
+
+    def _status_tekst(cid, wk, biomasse_kg=None):
+        _st = _koh_status(cid, wk, biomasse_kg)
+        if not _st:
+            return ""
+        _ant, _g, _t = _st
+        return f"\n{fmt_int(_ant)} stk\n{fmt_int(_g)} g · {fmt_int(_t)} t"
+
+    # 4 kaker per rad (3 rader per år) - plass til antall, vekt og biomasse på hvert kakestykke
+    # ---- Etiketter uten overlapp: kaken tegnes uten etiketter, og etikettene
+    # legges i to kolonner (venstre/høyre) med ledelinjer. Innen hver side
+    # skyves de fra hverandre vertikalt slik at ingen tekstblokker overlapper.
+    _PIE_FS = 9.5
+
+    def _pie_etiketter(ax, verdier, etiketter, fs=_PIE_FS):
+        import math as _math
+        tot = float(sum(verdier))
+        if tot <= 0:
+            return
+        _ax_in = _pie_rute_in                      # rutens side i tommer (fast rutenett, se under)
+        # Halv aksebredde R (kaken har radius 1) velges slik at den bredeste
+        # etiketten får plass innenfor ruta: 1,32 + tekstbredde <= R.
+        _maks_tegn = max((max(len(l) for l in lab.split("\n")) for lab in etiketter if lab), default=10)
+        _tekst_in = _maks_tegn * fs * 0.62 / 72 + 0.1
+        _nevner = 1 - 2 * _tekst_in / _ax_in
+        R = max(1.75, 1.32 / max(_nevner, 0.3))   # halv bredde (x)
+        Ry = max(1.25, R * _pie_aspekt)            # halv høyde (y) - ruta er lavere enn den er bred
+        lh = fs * 1.28 / 72 * (2 * R / _ax_in)     # én tekstlinje i dataenheter
+        sider = {1: [], -1: []}
+        cum = 0.0
+        for v, lab in zip(verdier, etiketter):
+            if lab and v >= 0:
+                th = _math.radians(90 - (cum + v / 2) / tot * 360)
+                side = 1 if _math.cos(th) >= 0 else -1
+                n_lin = lab.count("\n") + 1
+                sider[side].append({"th": th, "y0": 1.18 * _math.sin(th), "h": n_lin * lh, "lab": lab})
+            cum += v
+        gap = 0.25 * lh
+        for side, items in sider.items():
+            if not items:
+                continue
+            items.sort(key=lambda d: -d["y0"])
+            # nedover: ingen overlapp med etiketten over
+            prev = None
+            for d in items:
+                d["y"] = d["y0"] if prev is None else min(d["y0"], prev["y"] - (prev["h"] + d["h"]) / 2 - gap)
+                prev = d
+            # ikke over toppen av ruta
+            topp = Ry - items[0]["h"] / 2
+            if items[0]["y"] > topp:
+                items[0]["y"] = topp
+                for i in range(1, len(items)):
+                    items[i]["y"] = min(items[i]["y"], items[i - 1]["y"] - (items[i - 1]["h"] + items[i]["h"]) / 2 - gap)
+            # oppover igjen hvis nederste havner under bunnen
+            bunn = -Ry + items[-1]["h"] / 2
+            if items[-1]["y"] < bunn:
+                items[-1]["y"] = bunn
+                for i in range(len(items) - 2, -1, -1):
+                    items[i]["y"] = max(items[i]["y"], items[i + 1]["y"] + (items[i]["h"] + items[i + 1]["h"]) / 2 + gap)
+            for d in items:
+                xe, ye = _math.cos(d["th"]), _math.sin(d["th"])
+                xt = side * 1.32
+                ax.plot([xe * 1.0, xe * 1.08, side * 1.25], [ye * 1.0, ye * 1.08, d["y"]], color="#888", lw=0.6)
+                ax.text(xt, d["y"], d["lab"], ha="left" if side > 0 else "right", va="center", fontsize=fs,
+                        linespacing=1.15)
+        ax.set_xlim(-R, R)
+        ax.set_ylim(-Ry, Ry)
+        ax.set_aspect("equal", adjustable="datalim" if Ry != R * _pie_aspekt else "box")
+
+    # Faste skott har 8 etiketter per kake -> 3 kaker per rad (4 rader per år)
+    _pie_kol = 3 if cfg.SKOTT_FASTE else 4
+    # Radhøyde = kolonnebredde (kvadratiske ruter) -> ingen luft mellom radene
+    _pie_rader = len(_pie_ar) * (12 // _pie_kol)
+    # Fast rutenett: ruta er bred (etikettene står til venstre/høyre) og lav,
+    # så radene ligger tett. _pie_aspekt = høyde/bredde per rute.
+    _PIE_B, _PIE_WS, _PIE_HS = 22.0, 0.03, 0.14
+    _pie_aspekt = 0.78 if cfg.SKOTT_FASTE else 0.62
+    _pie_rute_in = _PIE_B * 0.96 / (_pie_kol + _PIE_WS * (_pie_kol - 1))
+    _pie_h = _pie_rader * _pie_rute_in * _pie_aspekt * (1 + _PIE_HS) + 0.2
+    fig_pie, axes = plt.subplots(_pie_rader, _pie_kol, figsize=(_PIE_B, _pie_h))
+    fig_pie.subplots_adjust(left=0.02, right=0.98, bottom=0.05 / _pie_h, top=1 - 0.35 / _pie_h,
+                            wspace=_PIE_WS, hspace=_PIE_HS)
     axes = axes.flatten()
     _i = 0
     for _ar in _pie_ar:
@@ -3041,39 +3288,47 @@ if n_tanker_aktiv > 1:
                 # med klokka). Innenfor hvert stykke: farget = kohortens m³-behov,
                 # hvitt = ubrukt volum i skottet. Svart ring markerer skottene.
                 _V = float(cfg.TANK_VOLUME_M3)
-                _per_tank = {}
-                for _c, _v in rad.items():
-                    try:
-                        _t = int(str(_c).split("-K")[1])
-                    except (IndexError, ValueError):
-                        continue
-                    _per_tank[_t] = (_c, min(float(_v), _V))
+                _n_sk = int(meta.get("n_skott", n_tanker_aktiv))
+                _wk_m = int(_pie_uke.loc[(_ar, m)])
                 _vals, _cols, _labs, _brukt = [], [], [], 0.0
-                for _t in range(1, n_tanker_aktiv + 1):
-                    _c, _m3 = _per_tank.get(_t, (None, 0.0))
+                for _s in range(_n_sk):
+                    _c = meta["skott_kohort"][_s][_wk_m] if "skott_kohort" in meta else ""
+                    _m3 = (min(meta["skott_biomasse_kg"][_s][_wk_m] / cfg.MAX_DENSITY_KG_M3, _V)
+                           if "skott_biomasse_kg" in meta else 0.0)
                     _brukt += _m3
                     _vals += [_m3, _V - _m3]
-                    _cols += [_tankfarge(f"G0-K{_t}"), "white"]
-                    _labs += [f"{_c}\n{_m3 / 1000:.0f}k" if _m3 > 0 else "",
-                              f"ledig\n{(_V - _m3) / 1000:.0f}k" if (_V - _m3) > 0.02 * _V else ""]
-                ax.pie(_vals, labels=_labs, colors=_cols, startangle=90, counterclock=False,
-                       wedgeprops={"edgecolor": "#999", "linewidth": 0.4}, textprops={"fontsize": 6})
-                ax.pie([_V] * n_tanker_aktiv, colors=["none"] * n_tanker_aktiv, startangle=90, counterclock=False,
+                    _cols += [_tankfarge(_c) if _c and not str(_c).startswith("(") else "white", "white"]
+                    # Én etikett per skott (ledig volum tas med i kohortens etikett) - to
+                    # etiketter per skott ble for trangt med større skrift.
+                    if _m3 > 0:
+                        _led = _V - _m3
+                        _labs += [f"S{_s + 1}: {_c} · {_m3 / 1000:.0f}k m³"
+                                  + _status_tekst(_c, _wk_m, meta["skott_biomasse_kg"][_s][_wk_m]), ""]
+                    else:
+                        _labs += ["", f"S{_s + 1}: vask" if str(_c).startswith("(") else f"S{_s + 1}: ledig"]
+                n_tanker_aktiv_pie = _n_sk
+                ax.pie(_vals, colors=_cols, startangle=90, counterclock=False,
+                       wedgeprops={"edgecolor": "#999", "linewidth": 0.4})
+                ax.pie([_V] * n_tanker_aktiv_pie, colors=["none"] * n_tanker_aktiv_pie, startangle=90, counterclock=False,
                        wedgeprops={"edgecolor": "#222", "linewidth": 1.4, "fill": False})
-                ax.set_title(f"{_mnd_navn[m - 1]} {_ar} - {_brukt / m3_pool * 100:.0f} % brukt", fontsize=8)
+                _pie_etiketter(ax, _vals, _labs)   # etter begge kakene - ax.pie nullstiller aksegrensene
+                ax.set_title(f"{_mnd_navn[m - 1]} {_ar} - {_brukt / m3_pool * 100:.0f} % brukt", fontsize=12, fontweight="bold", pad=2)
                 continue
             # FAST plass i kaken: alltid K1 først (kl. 12, med klokka), så K2,
             # K3 ... K6, deretter "Ledig" - uansett hvilken generasjon som
             # står i tanken. Da ligger hver tank på samme sted hver måned.
             rad = rad[sorted(rad.index, key=lambda c: (int(str(c).split("-K")[1]), str(c)))]
             verdier = list(rad.values) + [max(m3_pool - rad.sum(), 0.0)]
-            etiketter = [f"{c}\n{v / 1000:.0f}k" for c, v in rad.items()] + [f"Ledig\n{max(m3_pool - rad.sum(), 0) / 1000:.0f}k"]
+            _wk_m = int(_pie_uke.loc[(_ar, m)])
+            etiketter = ([f"{c} · {v / 1000:.0f}k m³" + _status_tekst(c, _wk_m) for c, v in rad.items()]
+                         + [f"Ledig\n{max(m3_pool - rad.sum(), 0) / 1000:.0f}k m³"])
             farger = [_alle_kohorter_farge[c] for c in rad.index] + ["white"]
-            ax.pie(verdier, labels=etiketter, colors=farger, startangle=90, counterclock=False,
-                   wedgeprops={"edgecolor": "#444", "linewidth": 0.6}, textprops={"fontsize": 6})
+            ax.pie(verdier, colors=farger, startangle=90, counterclock=False,
+                   wedgeprops={"edgecolor": "#444", "linewidth": 0.6})
+            _pie_etiketter(ax, verdier, etiketter)
             _brukt_pct = rad.sum() / m3_pool * 100
-            ax.set_title(f"{_mnd_navn[m - 1]} {_ar} - {_brukt_pct:.0f} % brukt", fontsize=8)
-    fig_pie.tight_layout()
+            ax.set_title(f"{_mnd_navn[m - 1]} {_ar} - {_brukt_pct:.0f} % brukt", fontsize=12, fontweight="bold", pad=2)
+    # (ingen tight_layout: rutenettet over er dimensjonert slik at etikettene får plass)
     st.pyplot(fig_pie, use_container_width=True)
     plt.close(fig_pie)
 
@@ -3171,14 +3426,14 @@ with st.expander("📊 Ressursregnskap (klikk for å vise/skjule)", expanded=Fal
             _tank_valg = st.selectbox(
                 "Vis ukentlig for:", options=["Hele anlegget (sum per uke)"]
                 + ([f"ABD {t}" for t in range(1, int(meta.get("n_abd", 1)) + 1)] if landanlegg
-                   else [f"Tank {t}" for t in range(1, n_tanker_aktiv + 1)]),
+                   else [f"{gruppe_navn} {t}" for t in range(1, n_tanker_aktiv + 1)]),
                 key="ledger_tank",
             )
             if _tank_valg.startswith("ABD"):
                 _t = int(_tank_valg.split()[-1])
                 show = show[show["kohort_id"].str.replace("(", "", regex=False).str.replace(")", "", regex=False)
                             .str.startswith(f"A{_t}-")]  # A{abd}-K{n}
-            if _tank_valg.startswith("Tank"):
+            if _tank_valg.startswith(("Tank", "Innsett")):
                 _t = int(_tank_valg.split()[-1])
                 show = show[show["kohort_id"].str.replace("(", "", regex=False).str.replace(")", "", regex=False)
                             .str.endswith(f"-K{_t}")]  # G{n}-K{t}: K = tank/utsett-nr
