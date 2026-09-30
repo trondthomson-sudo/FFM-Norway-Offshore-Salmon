@@ -168,6 +168,7 @@ def run(spec: dict) -> dict:
             g = runpy.run_path("ffm_big_dipper.py", run_name="__main__")
 
     res = g["_dcf_res"]
+    _by = g["by_year"].set_index("ar") if "by_year" in g else pd.DataFrame()
     bal = _year_last(g["balanse"])
     years = [int(y) for y in res.index]
     y2 = years[1] if len(years) > 1 else years[0]
@@ -183,6 +184,10 @@ def run(spec: dict) -> dict:
             "nibd_y2": float(bal.loc[y2, "banklan"] - bal.loc[y2, "kontanter"]) if y2 in bal.index else float(g["_ik_lan"]),
             "salgspris_kr_kg": float(getattr(g["cfg"], "SALES_PRICE_KR_PER_KG", 0.0) or 0.0),
             "kg_solgt_y2": float(res.loc[y2, "kg_solgt"]) if "kg_solgt" in res.columns else 0.0,
+            "inntekt_y2": float(res.loc[y2, "inntekt_kr"]) if "inntekt_kr" in res.columns else 0.0,
+            # fôr og bruttotilvekst i år 2 (for FCR i investment summary)
+            "for_kg_y2": float(_by.loc[y2, "mengde_for"]) if y2 in _by.index and "mengde_for" in _by.columns else 0.0,
+            "wfe_brutto_y2": float(_by.loc[y2, "kg_wfe_brutto"]) if y2 in _by.index and "kg_wfe_brutto" in _by.columns else 0.0,
             "solgt_enhet": "HOG" if getattr(g["cfg"], "PRODUKTTYPE", "") == "Slaktefisk" else "WFE",
             "smolt_kr_stk": float(g.get("computed_smolt_price", 0.0) or 0.0),
         },

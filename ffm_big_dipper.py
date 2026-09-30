@@ -27,6 +27,7 @@ from growth_tables import GrowthTables
 from scheduler_1tank import build_1tank_schedule, week_label, monday_of_week
 from scheduler_multitank import build_multitank_schedule
 from skott_allokering import alloker_skott, optimaliser_smolt
+import oversett as _oversett
 from scheduler_postsmolt import build_postsmolt_schedule, trinn_sammendrag
 from tankplan_postsmolt import tildel_kar, kohortplan_tabell, tegn_tankbruk, tegn_anlegg_maanedlig, tegn_anleggskart
 
@@ -65,9 +66,175 @@ def _auto_format_number_input(label, key, default_value, help_text=None, min_val
     return max(min_value, parse_number(st.session_state[key], default=default_value))
 
 
+# ----------------------------------------------------------------------
+# VALUTA: alle inndata skrives i NOK (feltene i sidepanelet), men modellen
+# REGNER og VISER i valgt valuta. Hvert NOK-beløp som kommer inn fra
+# sidepanelet/config deles på kursen (NOK per enhet) i det det leses - så er
+# hele modellen (ressursregnskap, kontantstrøm, resultat, balanse, DCF)
+# automatisk i valgt valuta, og etikettene "kr"/"NOK"/"MNOK" byttes ut i
+# visningen (se _valuta_tekst). Kursen er fast for hele horisonten.
+# ----------------------------------------------------------------------
+_VALUTA = "NOK"
+_KURS = 1.0          # NOK per 1 enhet valgt valuta (1,0 for NOK)
+
+
+def _fx(nok):
+    """NOK-beløp -> valgt valuta (None beholdes)."""
+    return None if nok is None else nok / _KURS
+
+
+_VALUTA_AKTIV = False   # True fra der sidepanelet slutter (og i Oppsummering): da byttes kr/NOK/MNOK i visningen
+
+
+def _valuta_tekst(t):
+    """Bytter valutaetiketter i en visningstekst: MNOK -> MUSD, NOK -> USD,
+    'kr' (som eget ord: kr/kg, (kr), kr/år) -> USD. Uendret for NOK eller
+    før sidepanelet er ferdig (inndata i NOK)."""
+    if _VALUTA == "NOK" or not _VALUTA_AKTIV or not isinstance(t, str) or not t:
+        return t
+    t = re.sub(r"\bMNOK\b", f"M{_VALUTA}", t)
+    t = re.sub(r"\bNOK\b", _VALUTA, t)
+    t = re.sub(r"(?<![A-Za-zÆØÅæøå_])kr(?![A-Za-zÆØÅæøå_])", _VALUTA, t)
+    return t
+
+
+def _vt(t):
+    """All visningstekst: språk (oversett.py) og deretter valutaetikett."""
+    return _valuta_tekst(_oversett.oversett(t))
+
+
+def _vt_md(t):
+    """Markdown/HTML-tekst: språk per tekstnode, deretter valutaetikett."""
+    return _valuta_tekst(_oversett.oversett_markdown(t))
+
+
+def _vt_df(df):
+    """Kopi av en DataFrame med språk/valuta i kolonnenavn, radnavn og tekstceller."""
+    if (_VALUTA == "NOK" or not _VALUTA_AKTIV) and _oversett.SPRAK == "no":
+        return df
+    if not isinstance(df, pd.DataFrame):
+        return df
+    out = df.copy()
+    out.columns = [(_vt(c) if isinstance(c, str) else c) for c in out.columns]
+    out.index = [(_vt(i) if isinstance(i, str) else i) for i in out.index]
+    if isinstance(out.index.name, str):
+        out.index.name = _vt(out.index.name)
+    for c in out.columns:
+        if out[c].dtype == object:
+            out[c] = out[c].map(lambda v: _vt(v) if isinstance(v, str) else v)
+    return out
+
+
+_valuta_df = _vt_df   # bakoverkompatibelt navn
+
+
+def _installer_valutaetiketter():
+    """Installerer visningslaget: språk (Norsk/English) og valuta på ALT som
+    tegnes - tekst, tabeller, nøkkeltall, grafer, feltnavn, hjelpetekster og
+    valgene i radioknapper/nedtrekkslister (via format_func, så verdiene
+    koden får tilbake forblir norske). Originalfunksjonene lagres én gang på
+    st-modulen, så Streamlit-reruns ikke stabler lag. Kalles på nytt når
+    språk/valuta endres i løpet av kjøringen (lagene leser globale verdier)."""
+    import matplotlib.text as _mtext
+    try:
+        from streamlit.delta_generator import DeltaGenerator as _DG
+    except Exception:
+        _DG = None
+    tekst_fn = ["caption", "subheader", "header", "title", "info", "warning", "success", "error", "text", "toast"]
+    md_fn = ["markdown", "write"]
+    widget_fn = ["radio", "selectbox", "multiselect", "number_input", "text_input", "text_area", "checkbox",
+                 "toggle", "slider", "date_input", "button", "download_button", "expander", "tabs", "spinner",
+                 "form_submit_button", "select_slider", "popover"]
+    alle = tekst_fn + md_fn + widget_fn + ["metric", "dataframe", "table", "pyplot", "data_editor"]
+    if not hasattr(st, "_valuta_orig"):
+        st._valuta_orig = {n: getattr(st, n) for n in alle if hasattr(st, n)}
+        st._valuta_orig_dg = {n: getattr(_DG, n) for n in alle if _DG is not None and hasattr(_DG, n)}
+        st._valuta_orig_comp_html = getattr(components, "html", None)
+    aktiv = (_VALUTA != "NOK" and _VALUTA_AKTIV) or _oversett.SPRAK != "no"
+    _ov = _oversett.oversett
+
+    def _args(navn, a, k):
+        if navn in tekst_fn:
+            a = tuple(_vt(x) if isinstance(x, str) else x for x in a)
+            if isinstance(k.get("body"), str):
+                k["body"] = _vt(k["body"])
+        elif navn in md_fn:
+            a = tuple(_vt_md(x) if isinstance(x, str) else (_vt_df(x) if isinstance(x, pd.DataFrame) else x) for x in a)
+            if isinstance(k.get("body"), str):
+                k["body"] = _vt_md(k["body"])
+        elif navn == "metric":
+            a = tuple(_vt(x) if isinstance(x, str) else x for x in a)
+            for kk in ("label", "value", "delta", "help"):
+                if isinstance(k.get(kk), str):
+                    k[kk] = _vt(k[kk])
+        elif navn in ("dataframe", "table"):
+            a = tuple(_vt_df(x) for x in a)
+            if "data" in k:
+                k["data"] = _vt_df(k["data"])
+        elif navn == "data_editor":
+            # kolonnenavn leses av koden -> vis oversatt navn via column_config
+            df = a[0] if a else k.get("data")
+            if _oversett.SPRAK != "no" and isinstance(df, pd.DataFrame):
+                cc = dict(k.get("column_config") or {})
+                for c in df.columns:
+                    if isinstance(c, str) and (c not in cc or cc[c] is None):
+                        cc[c] = st.column_config.Column(_ov(c)) if hasattr(st.column_config, "Column") else None
+                k["column_config"] = {kk: vv for kk, vv in cc.items() if vv is not None}
+        elif navn == "pyplot":
+            fig = a[0] if a else k.get("fig")
+            if fig is not None:
+                for t in fig.findobj(_mtext.Text):
+                    t.set_text(_vt(t.get_text()))
+                # Aksetekster satt med set_xticklabels lagres i en FixedFormatter og
+                # lages først når figuren tegnes - oversett selve listen.
+                from matplotlib.ticker import FixedFormatter as _FF, FuncFormatter as _FuF
+                for _ax in fig.axes:
+                    for _akse in (_ax.xaxis, _ax.yaxis):
+                        for _fm in (_akse.get_major_formatter(), _akse.get_minor_formatter()):
+                            if isinstance(_fm, _FF):
+                                _fm.seq = [_vt(x) if isinstance(x, str) else x for x in _fm.seq]
+                            elif isinstance(_fm, _FuF) and not getattr(_fm, "_ffm_oversatt", False):
+                                _fm.func = (lambda x, pos=None, _f=_fm.func: _vt(_f(x, pos)))
+                                _fm._ffm_oversatt = True
+        elif navn in widget_fn:
+            if a and isinstance(a[0], str):
+                a = (_ov(a[0]),) + tuple(a[1:])
+            elif navn == "tabs" and a and isinstance(a[0], (list, tuple)):
+                a = ([_ov(x) for x in a[0]],) + tuple(a[1:])
+            for kk in ("label", "help", "text", "placeholder"):
+                if isinstance(k.get(kk), str):
+                    k[kk] = _ov(k[kk])
+            if navn in ("radio", "selectbox", "multiselect", "select_slider") and _oversett.SPRAK != "no":
+                ff = k.get("format_func")
+                k["format_func"] = (lambda o, _f=ff: _ov(str(_f(o)))) if ff else (lambda o: _ov(str(o)))
+        return a, k
+
+    def _lag(navn, orig, bound):
+        if bound:
+            def f(*a, **k):
+                a, k = _args(navn, a, k)
+                return orig(*a, **k)
+        else:
+            def f(self, *a, **k):
+                a, k = _args(navn, a, k)
+                return orig(self, *a, **k)
+        return f
+
+    for n, orig in st._valuta_orig.items():
+        setattr(st, n, _lag(n, orig, True) if aktiv else orig)
+    for n, orig in st._valuta_orig_dg.items():
+        setattr(_DG, n, _lag(n, orig, False) if aktiv else orig)
+    if st._valuta_orig_comp_html is not None:
+        _oh = st._valuta_orig_comp_html
+        components.html = ((lambda html, *a, **k: _oh(_valuta_tekst(_oversett.oversett_html(html)), *a, **k))
+                           if aktiv else _oh)
+
+
 def _nok_input(label, key, default_value, container=None, help_text=None):
     """NOK-beløp i sidepanelet: tusenskille (mellomrom) legges på automatisk
-    når feltet mister fokus - også på tall brukeren selv skriver inn."""
+    når feltet mister fokus - også på tall brukeren selv skriver inn.
+    Feltet og returverdien er i NOK - omregning til valgt valuta skjer samlet
+    der sidepanelet slutter (se "VALUTA: omregning av sidepanelets beløp")."""
     return _auto_format_number_input(label, key=key, default_value=float(default_value),
                                      min_value=0.0, container=container, help_text=help_text)
 
@@ -688,6 +855,9 @@ def _render_expandable_kontantstrom(wide_df: pd.DataFrame, highlight_groups: lis
 
 
 st.set_page_config(page_title="Norway Offshore Salmon", layout="wide")
+# Språk settes FØR noe tegnes (tittelen over sidepanelet), fra forrige valg i økten
+_oversett.SPRAK = "en" if st.session_state.get("sprak") == "English" else "no"
+_installer_valutaetiketter()   # valuta ikke aktiv her; språk aktivt hvis English
 if st.session_state.get("produkttype_valg", OPPSUMMERING_VALG) not in (OPPSUMMERING_VALG, STRATEGI_VALG):
     st.title("Post-smolt landanlegg - leveranse til Big Dipper" if st.session_state.get("produkttype_valg") == LANDANLEGG_VALG
              else "Norway Offshore Salmon" + (" - Konsolidert (Aqualoop + NOS)" if st.session_state.get("produkttype_valg") == "Konsolidert" else ""))
@@ -824,11 +994,20 @@ def _render_strategi():
 
 
 def _render_oppsummering():
+    global _VALUTA, _VALUTA_AKTIV
     import subprocess, json as _json, hashlib as _hashlib
     from matplotlib.patches import Patch as _Patch
+    # Valuta: bakgrunnskjøringene regner i valgt valuta (samme kurs), og alle
+    # etiketter i figur/tabeller (MNOK osv.) byttes til valgt valuta.
+    _valuta_sess = {"valuta": _VALUTA, "usdnok": float(st.session_state.get("usdnok", 10.0)),
+                    "eurnok": float(st.session_state.get("eurnok", 11.5))}
+    _VALUTA_AKTIV = True
+    _installer_valutaetiketter()
 
     @st.cache_data(show_spinner=False, persist="disk")   # varig på disk: ventetiden kommer bare én gang per kode-/forutsetningsendring
-    def _kjor_headless(spec_json: str, _fingerprint: str) -> dict:
+    def _kjor_headless(spec_json: str, kode_fingerprint: str) -> dict:
+        # NB: argumentnavnet må IKKE starte med "_" - da hopper st.cache_data over
+        # det i nøkkelen, og gamle resultater gjenbrukes etter kodeendringer.
         _r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffm_headless.py"), spec_json],
                             capture_output=True, text=True, timeout=900)
         if _r.returncode != 0:
@@ -854,7 +1033,8 @@ def _render_oppsummering():
     _her = os.path.dirname(os.path.abspath(__file__))
     _fp_bytes = b""
     for _f in ("ffm_big_dipper.py", "config_1tank.py", "config_postsmolt.py", "resource_ledger.py", "ffm_headless.py",
-               "scheduler_1tank.py", "scheduler_multitank.py", "scheduler_postsmolt.py", "simulator.py", "growth_tables.py", "temperature.py"):
+               "scheduler_1tank.py", "scheduler_multitank.py", "scheduler_postsmolt.py", "simulator.py", "growth_tables.py", "temperature.py",
+               "skott_allokering.py"):
         _pf = os.path.join(_her, _f)
         if os.path.exists(_pf):
             with open(_pf, "rb") as _fh:
@@ -863,9 +1043,10 @@ def _render_oppsummering():
     _M = 1e6
 
     def _specs(pris, design):
-        _sess = {"smolt_pris_modus": "Eget post-smolt-anlegg (kr/kg WFE)", "smolt_eget_pris_kr_kg": float(pris)}
+        _sess = {"smolt_pris_modus": "Eget post-smolt-anlegg (kr/kg WFE)", "smolt_eget_pris_kr_kg": float(pris),
+                 **_valuta_sess}
         return [_json.dumps({"view": "SFaaS oppdrett", "session": _sess}),
-                _json.dumps({"view": LANDANLEGG_VALG, "design": design, "salgspris": float(pris)})]
+                _json.dumps({"view": LANDANLEGG_VALG, "design": design, "salgspris": float(pris), "session": dict(_valuta_sess)})]
 
     def _hent_alle(spec_liste):
         """Kjør alle spesifikasjoner parallelt (én underprosess hver); cachede
@@ -991,6 +1172,7 @@ def _render_oppsummering():
         return fig, pd.DataFrame(rows)
 
     st.title("Oppsummering - enterprise value mot CAPEX per selskap")
+    _inv_topp = st.container()   # Investment summary - fylles når kjøringene er ferdige (vises øverst)
     st.caption("Venstre søyle: enterprise value (nåverdi av fri kontantstrøm til totalkapitalen etter skatt + sluttverdi). Høyre søyle: CAPEX "
                "med verdiskapingen (EV - CAPEX) lagt oppå - som en balanse. Samme tall og prinsipp som fossefallene nederst i de tre visningene; "
                "NOS som leietaker har verken CAPEX eller gjeld, så der er verdiskapingen lik EV.")
@@ -1010,12 +1192,12 @@ def _render_oppsummering():
     _ymax_felles = max(((e[4] + e[5]) / _M) for e in (_ent1_ + _ent2_ + [_sum(_ent1_, 1, "s"), _sum(_ent2_, 1, "s")]))
     _c1, _c2 = st.columns(2)
     with _c1:
-        st.subheader(f"Én Big Dipper - {fmt_int(_hog1)} t HOG/år - post-smolt {_pris1:.0f} kr/kg ({_des1.split(' –')[0]})")
-        _fig1, _tab1 = _tegn(_ent1_, f"Én ABD: {fmt_int(_hog1)} t HOG laks per år, {fmt_int(_ps1)} t post-smolt til {_pris1:.0f} kr/kg.", ymax_felles=_ymax_felles)
+        st.subheader(f"Én Big Dipper - {fmt_int(_hog1)} t HOG/år - post-smolt {_fx(_pris1):.0f} kr/kg ({_des1.split(' –')[0]})")
+        _fig1, _tab1 = _tegn(_ent1_, f"Én ABD: {fmt_int(_hog1)} t HOG laks per år, {fmt_int(_ps1)} t post-smolt til {_fx(_pris1):.0f} kr/kg.", ymax_felles=_ymax_felles)
         st.pyplot(_fig1, use_container_width=True); plt.close(_fig1)
     with _c2:
-        st.subheader(f"To Big Dippere - {fmt_int(_hog2)} t HOG/år - post-smolt {_pris2:.0f} kr/kg ({_des2.split(' –')[0]})")
-        _fig2, _tab2 = _tegn(_ent2_, f"To ABD-er: {fmt_int(_hog2)} t HOG laks per år, {fmt_int(_ps2)} t post-smolt til {_pris2:.0f} kr/kg.", ymax_felles=_ymax_felles)
+        st.subheader(f"To Big Dippere - {fmt_int(_hog2)} t HOG/år - post-smolt {_fx(_pris2):.0f} kr/kg ({_des2.split(' –')[0]})")
+        _fig2, _tab2 = _tegn(_ent2_, f"To ABD-er: {fmt_int(_hog2)} t HOG laks per år, {fmt_int(_ps2)} t post-smolt til {_fx(_pris2):.0f} kr/kg.", ymax_felles=_ymax_felles)
         st.pyplot(_fig2, use_container_width=True); plt.close(_fig2)
     # ---- Seks ABD-er = 3 x (to ABD-er): én konsesjon / blokk på ca. 100 000 tonn ----
     def _skaler(ent, k, navn_map):
@@ -1031,10 +1213,82 @@ def _render_oppsummering():
     _hog6, _ps6 = 3 * _hog2, 3 * _ps2
     _sum6 = _sum(_ent6, 1, "Konsolidert")
     _ev6 = (_sum6[4] + _sum6[5]) / _M; _capex6 = _sum6[1] / _M; _verdi6 = _ev6 - _capex6
+
+    # ---- INVESTMENT SUMMARY (øverst): hele verdikjeden konsolidert (rigg +
+    # oppdrett + post-smolt), første fulle driftsår (år 2), alt per kg HOG
+    # solgt laks. Internleie (NOS -> Aqualoop) og internsalg av post-smolt
+    # nettes ut: salg = laks solgt eksternt, EBITDA = sum EBITDA i de tre
+    # selskapene, opex = salg - EBITDA. EV/CAPEX = som i fossefallene. ----
+    def _inv_kol(ent, n_rigg, s_op):
+        k = _sum(ent, 1, "")
+        _e_rigg = next(e for e in ent if e[0].startswith("Aqualoop"))
+        _e_nos = next(e for e in ent if e[0].startswith("NOS"))
+        _e_ps = next(e for e in ent if "post-smolt" in e[0].lower())
+        enheter = {nm: {"ev": e[4] + e[5], "capex": e[1], "ebitda": e[3]}
+                   for nm, e in (("rigg", _e_rigg), ("nos", _e_nos), ("ps", _e_ps))}
+        kg = n_rigg * s_op["kg_solgt_y2"]                 # kg HOG solgt, år 2
+        salg = n_rigg * s_op.get("inntekt_y2", 0.0)
+        ebitda, capex, ev = k[3], k[1], k[4] + k[5]
+        fo = n_rigg * s_op.get("for_kg_y2", 0.0)
+        wfe = n_rigg * s_op.get("wfe_brutto_y2", 0.0)
+        return {"kg": kg, "salg": salg, "ebitda": ebitda, "capex": capex, "ev": ev,
+                "opex": salg - ebitda, "for": fo, "wfe": wfe, "enheter": enheter}
+    def _x_capex(d):
+        return f"{d['ev'] / d['capex']:.2f}x" if d["capex"] else "- (ingen CAPEX, leier)"
+    def _x_ebitda(d):
+        return f"{d['ev'] / d['ebitda']:.1f}x" if d["ebitda"] else "-"
+    _ik = [("1 Big Dipper", _inv_kol(_ent1_, 1, _s1["operator"])),
+           ("2 Big Dippere", _inv_kol(_ent2_, 2, _s2["operator"])),
+           ("6 Big Dippere", _inv_kol(_ent6, 6, _s2["operator"]))]
+    _ar2 = _s1["operator"]["years"][1] if len(_s1["operator"]["years"]) > 1 else ""
+    def _pk(v, kg):
+        return fmt_float(v / kg, 2) if kg else "-"
+    _rader = [
+        ("Laks solgt (t HOG/år)", lambda c: fmt_int(c["kg"] / 1000)),
+        ("Salgsinntekter (MNOK)", lambda c: fmt_int(c["salg"] / _M)),
+        ("EBITDA (MNOK)", lambda c: fmt_int(c["ebitda"] / _M)),
+        ("EBITDA-margin", lambda c: f"{c['ebitda'] / c['salg'] * 100:.0f} %" if c["salg"] else "-"),
+        ("Enterprise value, EV (MNOK)", lambda c: fmt_int(c["ev"] / _M)),
+        ("CAPEX (MNOK)", lambda c: fmt_int(c["capex"] / _M)),
+        ("Salgspris (kr/kg HOG)", lambda c: _pk(c["salg"], c["kg"])),
+        ("Opex (kr/kg HOG)", lambda c: _pk(c["opex"], c["kg"])),
+        ("EBITDA (kr/kg HOG)", lambda c: _pk(c["ebitda"], c["kg"])),
+        ("EV (kr/kg HOG)", lambda c: _pk(c["ev"], c["kg"])),
+        ("CAPEX (kr/kg HOG)", lambda c: _pk(c["capex"], c["kg"])),
+        ("FCR (kg fôr per kg HOG)", lambda c: fmt_float(c["for"] / c["kg"], 2) if c["kg"] else "-"),
+        ("FCR biologisk (kg fôr per kg tilvekst WFE)", lambda c: fmt_float(c["for"] / c["wfe"], 2) if c["wfe"] else "-"),
+        ("EV / CAPEX - SFaaS-rigg (Aqualoop)", lambda c: _x_capex(c["enheter"]["rigg"])),
+        ("EV / CAPEX - oppdrett (NOS)", lambda c: _x_capex(c["enheter"]["nos"])),
+        ("EV / CAPEX - landbasert post-smolt", lambda c: _x_capex(c["enheter"]["ps"])),
+        ("EV / CAPEX - konsolidert", lambda c: f"{c['ev'] / c['capex']:.2f}x" if c["capex"] else "-"),
+        ("EV / EBITDA implisitt - SFaaS-rigg (Aqualoop)", lambda c: _x_ebitda(c["enheter"]["rigg"])),
+        ("EV / EBITDA implisitt - oppdrett (NOS)", lambda c: _x_ebitda(c["enheter"]["nos"])),
+        ("EV / EBITDA implisitt - landbasert post-smolt", lambda c: _x_ebitda(c["enheter"]["ps"])),
+        ("EV / EBITDA implisitt - konsolidert", lambda c: f"{c['ev'] / c['ebitda']:.1f}x" if c["ebitda"] else "-"),
+    ]
+    _inv_df = pd.DataFrame({navn: [f(c) for _, f in _rader] for navn, c in _ik}, index=[r for r, _ in _rader])
+    _inv_df.index.name = "Felt"
+    with _inv_topp:
+        st.subheader(f"Investment summary - første fulle driftsår ({_ar2}), per kg HOG")
+        _render_table(_inv_df, highlight_groups=[
+            {"rows": ["Salgspris (kr/kg HOG)", "Opex (kr/kg HOG)", "EBITDA (kr/kg HOG)", "EV (kr/kg HOG)",
+                      "CAPEX (kr/kg HOG)"], "bg": "#fbf3e6", "text": "#9a6b2a"},
+            {"rows": ["EBITDA (MNOK)", "Enterprise value, EV (MNOK)"], "bg": "#eef7ee", "text": "#3d7a3d"},
+            {"rows": ["EV / CAPEX - konsolidert", "EV / EBITDA implisitt - konsolidert"], "bg": "#eef1f6", "text": "#2f4a6b"},
+        ])
+        st.caption(
+            "Hele verdikjeden konsolidert: Big Dipper-rigg(er) (Aqualoop), oppdrett (NOS) og eget post-smoltanlegg - "
+            "internleie og internsalg av post-smolt er nettet ut. Første fulle driftsår med full produksjon (år 2). "
+            "Salg = laks solgt; opex = salg - EBITDA (alle driftskostnader i de tre selskapene); EV = sum enterprise "
+            "value (DCF for rigg og post-smoltanlegg, EBITDA-multippel for NOS, som i figurene under); CAPEX = rigg(er) + "
+            "post-smoltanlegg. Alle kg er HOG solgt laks. FCR = fôr i Big Dipper per kg HOG solgt (biologisk FCR på "
+            "WFE-tilvekst i egen rad). 2 Big Dippere deler ett post-smoltanlegg (Fase I.B); 6 = 3 x 2."
+        )
+        st.markdown("---")
     _nos6 = next(e for e in _ent6 if e[0].startswith("NOS"))
     _nos6_ev = (_nos6[4] + _nos6[5]) / _M
     st.markdown("---")
-    st.subheader(f"Seks Big Dippere - {fmt_int(_hog6)} t HOG/år - post-smolt {_pris2:.0f} kr/kg fra tre anlegg ({_des2.split(' –')[0]})")
+    st.subheader(f"Seks Big Dippere - {fmt_int(_hog6)} t HOG/år - post-smolt {_fx(_pris2):.0f} kr/kg fra tre anlegg ({_des2.split(' –')[0]})")
     _b1, _b2, _b3 = st.columns(3)
     _b1.metric("Mulig verdi på én konsesjon for blokk på 100 000 tonn", f"{fmt_int(_nos6_ev)} MNOK",
                help=f"Verdien av selve oppdrettsvirksomheten til havs: NOS oppdretter, 6 selskap, {_nos_mult:.0f}x EBITDA år 2, uten CAPEX og gjeld.")
@@ -1053,12 +1307,19 @@ def _render_oppsummering():
     #      beregning, ingen justering i appen) - se prisdokumentasjon.py. Ligger sist
     #      med vilje: verdiene først, prisdiskusjonen til slutt. ----
     st.markdown("---")
+    _valuta_lagret = _VALUTA
     try:
         from prisdokumentasjon import tegn_prisdokumentasjon as _tegn_pris
+        if _valuta_lagret != "NOK":
+            st.caption(f"Prisdokumentasjonen under vises i NOK (historiske og eksterne prisdata i NOK). "
+                       f"Modellens startpris 100 NOK/kg tilsvarer {fmt_float(_fx(100.0), 2)} {_valuta_lagret}/kg.")
+        _VALUTA = "NOK"   # prisdokumentasjonen er i NOK - ingen etikettbytte her
         _tegn_pris(st, startpris_kr_kg=100.0, eskalering_pct=2.0,
                    modell_startaar=int(bd_config.START_ISO_YEAR), faktisk_startaar=2030,
                    n_aar=int(bd_config.N_YEARS_TO_RUN))
+        _VALUTA = _valuta_lagret
     except Exception as _e_pris:
+        _VALUTA = _valuta_lagret
         st.caption(f"Prisdokumentasjonen kunne ikke tegnes ({_e_pris}) - sjekk at prisdokumentasjon.py ligger i samme mappe.")
 
 
@@ -1073,6 +1334,28 @@ with st.sidebar:
     # Kodefeltet er FJERNET (bekreftet av bruker) - IRR-seksjonen for
     # utleier vises alltid.
     _vis_irr = True
+
+    # ---- Språk og valuta for visning (se oversett.py og _fx / _valuta_tekst øverst) ----
+    _sprak_valg = st.radio("Språk / Language", options=["Norsk", "English"], index=0, horizontal=True, key="sprak",
+                           help="Oversetter alt som vises (tekst, tabeller, grafer, feltnavn). Tallformat følger "
+                                "språket (English: 1,234,567). Uavhengig av valutavalget under.")
+    if (_sprak_valg == "English") != (_oversett.SPRAK == "en"):
+        _oversett.SPRAK = "en" if _sprak_valg == "English" else "no"
+        _installer_valutaetiketter()
+    st.header("Valuta")
+    _VALUTA = st.radio("Vis alle tall i", options=["NOK", "USD", "EUR"], index=0, horizontal=True, key="valuta",
+                       help="Inndatafeltene i sidepanelet er alltid i NOK. Modellen regner om alle beløp til "
+                            "valgt valuta med én fast kurs for hele horisonten - regnskap, kontantstrøm, balanse, "
+                            "DCF, kr/kg-tall og grafer vises i valgt valuta.")
+    _cx1, _cx2 = st.columns(2)
+    _usdnok = float(_cx1.number_input("USDNOK", min_value=0.01, value=10.00, step=0.05, format="%.4f", key="usdnok",
+                                      help="NOK per 1 USD"))
+    _eurnok = float(_cx2.number_input("EURNOK", min_value=0.01, value=11.50, step=0.05, format="%.4f", key="eurnok",
+                                      help="NOK per 1 EUR"))
+    _KURS = {"NOK": 1.0, "USD": _usdnok, "EUR": _eurnok}[_VALUTA]
+    if _VALUTA != "NOK":
+        st.caption(f"→ Alle beløp vises i {_VALUTA} (1 {_VALUTA} = {fmt_float(_KURS, 4)} NOK). "
+                   "Inndatafeltene under er fortsatt i NOK.")
 
     if st.session_state.get("produkttype_valg") == "Konsolidert":
         st.info("Konsolidert er en ren OUTPUT-visning av 'SFaaS oppdrett': samme forutsetninger og felt, "
@@ -2310,7 +2593,7 @@ with st.sidebar:
                 step=0.01, format="%.2f", key=f"factor_{r['id']}",
             )
             price_txt = pc.text_input(f"Pris (kr/{r['enhet']})", value=default_price_str, key=f"price_{r['id']}")
-        resource_prices[r["id"]] = parse_number(price_txt) if price_txt.strip() else None
+        resource_prices[r["id"]] = _fx(parse_number(price_txt)) if price_txt.strip() else None
 
     st.header("Årlig indeksering")
     st.caption(
@@ -2389,6 +2672,29 @@ class RunConfig:
     pass
 
 
+# ----------------------------------------------------------------------
+# VALUTA: omregning av sidepanelets beløp. Alt i sidepanelet (felt og
+# forhåndsvisninger) er i NOK; herfra og ned regner modellen i valgt
+# valuta. Listen under er ALLE NOK-beløp fra sidepanelet som brukes videre
+# (kontrollert: med USDNOK = 10 blir hvert beløp i regnskap, kontantstrøm,
+# balanse og DCF nøyaktig 1/10 av NOK-kjøringen). Priser i ressurs-
+# regnskapet, salgspris og smoltpris regnes om der de settes på cfg.
+# ----------------------------------------------------------------------
+capex = _fx(capex)
+desinfeksjon_per_kohort_kr = _fx(desinfeksjon_per_kohort_kr)
+kapitalleie_ar = _fx(kapitalleie_ar)
+oppankring_inv = _fx(oppankring_inv)
+oppankring_mnd_belop = _fx(oppankring_mnd_belop)
+oppankring_ar = _fx(oppankring_ar)
+banklan_belop_preview = _fx(banklan_belop_preview)
+vedlikeholdsinvestering_nok = _fx(vedlikeholdsinvestering_nok)
+avskrivninger_ar = _fx(avskrivninger_ar)
+finanskostnader_ar = _fx(finanskostnader_ar)
+hexacage_sublinjer_kr_per_uke = {k: _fx(v) for k, v in hexacage_sublinjer_kr_per_uke.items()}
+fixed_cost_prices = {k: _fx(v) for k, v in fixed_cost_prices.items()}
+_VALUTA_AKTIV = True
+_installer_valutaetiketter()   # "kr"/"NOK"/"MNOK" -> valgt valuta i alt som vises herfra og ned
+
 cfg = RunConfig()
 cfg.TANK_VOLUME_M3 = tank_volume_m3
 cfg.MAX_DENSITY_KG_M3 = max_density
@@ -2401,10 +2707,10 @@ cfg.BATCH_SMOLT_COUNTS = smolt_counts
 # det gjorde at build_resource_ledger() sin per-kohort formelbaserte
 # smoltprising (hasattr(cfg, "SMOLT_PRICE_BASE_KR")) aldri faktisk slo inn
 # i den virkelige appen, uansett hva brukeren skrev inn i sidepanelet.
-cfg.SMOLT_PRICE_BASE_KR = smolt_price_base
-cfg.SMOLT_PRICE_PER_GRAM_KR = smolt_price_per_gram
+cfg.SMOLT_PRICE_BASE_KR = _fx(smolt_price_base)
+cfg.SMOLT_PRICE_PER_GRAM_KR = _fx(smolt_price_per_gram)
 cfg.SMOLT_PRIS_MODUS = cfg_smolt_pris_modus
-cfg.SMOLT_VERDITABELL_KR_PER_KG = default_config.SMOLT_VERDITABELL_KR_PER_KG
+cfg.SMOLT_VERDITABELL_KR_PER_KG = [(g, _fx(kr)) for g, kr in default_config.SMOLT_VERDITABELL_KR_PER_KG]
 cfg.BATCH_GROWTH_WEEKS = growth_weeks
 cfg.BATCH_CLEANING_WEEKS = cleaning_weeks
 cfg.BATCH_SALES_WINDOW_WEEKS = sales_window_weeks
@@ -2455,12 +2761,12 @@ if produkttype == "Postsmolt":
             r["faktor_per_kg_wfe"] = 0.0
 cfg.RESOURCE_PRICES_NOK = resource_prices
 cfg.WFE_FAKTOR = default_config.WFE_FAKTOR
-cfg.SALES_PRICE_KR_PER_KG = parse_number(salgspris_txt) if salgspris_txt.strip() else 0.0
+cfg.SALES_PRICE_KR_PER_KG = _fx(parse_number(salgspris_txt)) if salgspris_txt.strip() else 0.0
 if landanlegg and salgspris_modus == "Fast pris (kr/kg)":
-    st.session_state["landanlegg_salgspris_kr_kg"] = float(cfg.SALES_PRICE_KR_PER_KG)   # hentes av "Eget post-smolt-anlegg" i SFaaS/Konsolidert
+    st.session_state["landanlegg_salgspris_kr_kg"] = float(parse_number(salgspris_txt)) if salgspris_txt.strip() else 0.0   # NOK (inndatafelt)   # hentes av "Eget post-smolt-anlegg" i SFaaS/Konsolidert
 cfg.SALGSPRIS_MODUS = salgspris_modus
 _sales_price_table_runtime = (
-    default_config.SMOLT_VERDITABELL_KR_PER_KG if salgspris_modus == "Følger fiskeverditabellen" else None
+    cfg.SMOLT_VERDITABELL_KR_PER_KG if salgspris_modus == "Følger fiskeverditabellen" else None   # allerede i valgt valuta
 )
 cfg.USE_SEASONAL_PRICE_INDEX = bruk_sesongpris
 cfg.ESCALATION_RATES_BY_YEAR = escalation_rates_by_year
@@ -2526,7 +2832,7 @@ if "_tabell_pris_placeholder" in dir() and cfg_smolt_pris_modus == "Tabell" and 
         _tabell_pris_placeholder.markdown(
             f"**Implisitt pris ved tabellvalget, første 12 måneder ({_t0.strftime('%b %Y')}–{(_t0 + pd.DateOffset(months=11)).strftime('%b %Y')}):** "
             f"**{fmt_float(_tp_kr_stk / _tp_kg, 2)} kr/kg WFE** = {fmt_float(_tp_kr_stk, 2)} kr/stk ved {fmt_float(_tp_kg * 1000, 0)} g "
-            f"({fmt_int(_tp_stk)} stk kjøpt). Til sammenligning: eget anlegg {fmt_float(float(st.session_state.get('landanlegg_salgspris_kr_kg', getattr(postsmolt_config, 'POSTSMOLT_SALGSPRIS_KR_PER_KG', 100.0))), 1)} kr/kg."
+            f"({fmt_int(_tp_stk)} stk kjøpt). Til sammenligning: eget anlegg {fmt_float(_fx(float(st.session_state.get('landanlegg_salgspris_kr_kg', getattr(postsmolt_config, 'POSTSMOLT_SALGSPRIS_KR_PER_KG', 100.0)))), 1)} kr/kg."
         )
 if landanlegg and oppskrift_resultat_placeholder:
     _k0 = next(iter(generations.values()))
