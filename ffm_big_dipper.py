@@ -1026,9 +1026,7 @@ def _render_oppsummering():
         st.markdown("**Høyre: to ABD-er**")
         _pris2 = st.number_input("Post-smolt fra eget anlegg, 2 ABD (kr/kg WFE)", min_value=0.0, value=85.0, step=1.0, format="%.0f", key="op_pris2")
         _des2 = st.selectbox("Post-smoltanlegg, 2 ABD", options=_designs_op, index=_designs_op.index(_d_ib) if _d_ib in _designs_op else 0, key="op_design2")
-        _nos_mult = st.number_input("NOS oppdretter (leier): EV som x EBITDA år 2", min_value=1.0, max_value=20.0, value=8.0, step=0.5, format="%.1f", key="op_nos_mult",
-                                    help="Oppdretter uten CAPEX verdsettes til multippel av første fulle års EBITDA (bekreftet 12.09.2026: 8x) i stedet for DCF.")
-        st.caption("Rigg: DCF med standardverdier i SFaaS (8 % / 10x); landanlegg 7 % / 12x; oppdretter x EBITDA. To ABD-er = to identiske rigger og "
+        st.caption("Rigg: DCF med standardverdier i SFaaS (8 % / 10x); landanlegg 7 % / 12x; oppdretter DCF (8 % / 10x, som i SFaaS). To ABD-er = to identiske rigger og "
                    "oppdrettsselskap (tallene fra én rigg doblet) og ett post-smoltanlegg som leverer til begge. Første kjøring tar 2-3 minutter; deretter mellomlagret.")
     _her = os.path.dirname(os.path.abspath(__file__))
     _fp_bytes = b""
@@ -1059,11 +1057,10 @@ def _render_oppsummering():
         f = float(n)
         u, o, p = _s["utleier"], _s["operator"], _p["operator"]
         rigg = "rigg" if n == 1 else f"{n} rigger"
-        nos_ev = f * o["ebitda_y2"] * float(_nos_mult)
         return [
             # navn, capex, innskutt EK / kapitalbehov, ebitda y2, pv_fcff, pv_tv, r, mult, farge, scenario, banklån
             (f"Aqualoop - {rigg} (utleier)", f * u["capex"], f * (u["capex"] - u["lan"]), f * u["ebitda_y2"], f * u["pv_fcff"], f * u["pv_tv"], u["r"], u["mult"], "#6b7f95", 1, f * u["lan"]),
-            (f"NOS - oppdretter{'' if n == 1 else ' x' + str(n)} (leier)", 0.0, f * o["ek_oper"], f * o["ebitda_y2"], 0.0, nos_ev, None, float(_nos_mult), "#2f5d8a", 1, 0.0),
+            (f"NOS - oppdretter{'' if n == 1 else ' x' + str(n)} (leier)", 0.0, f * o["ek_oper"], f * o["ebitda_y2"], f * o["pv_fcff"], f * o["pv_tv"], o["r"], o["mult"], "#2f5d8a", 1, 0.0),
             ("Post-smoltanlegg (eget)", p["capex"], p["ek_invest"] + p["ek_oper"], p["ebitda_y2"], p["pv_fcff"], p["pv_tv"], p["r"], p["mult"], "#c0522b", 1, p["lan"]),
         ]
 
@@ -1117,7 +1114,8 @@ def _render_oppsummering():
             verdi = ev - grunnlag
             # venstre: EV
             ax.bar(i - w / 2, ev, w, color="#2f5d8a", alpha=0.9, edgecolor="#333", lw=0.6)   # samme blå på alle EV-søyler
-            ax.text(i - w / 2, ev + ev * 0.015 + 40, f"EV {fmt_int(ev)}", ha="center", va="bottom", fontsize=11, fontweight="bold")
+            _npv = capex <= 0 and bool(e[6])   # leietaker (NOS): verdien er netto nåverdi (DCF); EV/EBITDA er bare implisitt
+            ax.text(i - w / 2, ev + ev * 0.015 + 40, (f"NPV {fmt_int(ev)}" if _npv else f"EV {fmt_int(ev)}"), ha="center", va="bottom", fontsize=11, fontweight="bold")
             # høyre: CAPEX + verdiskaping oppå
             if capex > 0:
                 ax.bar(i + w / 2, grunnlag, w, color="#c8c8c8", edgecolor="#555", lw=0.6)
@@ -1139,9 +1137,13 @@ def _render_oppsummering():
                 ax.text(i + w / 2, grunnlag / 2, "CAPEX\n" + fmt_int(grunnlag), ha="center", va="center", fontsize=10.5, color="#222")
             else:
                 ax.text(i + w / 2, -_ymax_all * 0.012, "ingen CAPEX (leier)", ha="center", va="top", fontsize=8.5, color="#666")
-            ax.text(i, -_ymax_all * 0.05,
-                    (f"EV/CAPEX {ev / grunnlag:.2f}x\n" if grunnlag else "") + f"EV/EBITDA {ev / (e[3] / _M):.1f}x" + (f"\n{e[6] * 100:.0f} % / {e[7]:.0f}x" if e[6] else (f"\n{e[7]:.0f}x EBITDA år 2" if e[7] else "")),
-                    ha="center", va="top", fontsize=10, color="#3d7a3d" if verdi >= 0 else "#a33a3a")
+            if _npv:
+                ax.text(i, -_ymax_all * 0.05, f"NPV: DCF {e[6] * 100:.0f} % / {e[7]:.0f}x\nimplisitt EV/EBITDA {ev / (e[3] / _M):.1f}x",
+                        ha="center", va="top", fontsize=10, color="#3d7a3d" if verdi >= 0 else "#a33a3a")
+            else:
+                ax.text(i, -_ymax_all * 0.05,
+                        (f"EV/CAPEX {ev / grunnlag:.2f}x\n" if grunnlag else "") + f"EV/EBITDA {ev / (e[3] / _M):.1f}x" + (f"\n{e[6] * 100:.0f} % / {e[7]:.0f}x" if e[6] else (f"\n{e[7]:.0f}x EBITDA år 2" if e[7] else "")),
+                        ha="center", va="top", fontsize=10, color="#3d7a3d" if verdi >= 0 else "#a33a3a")
         ax.axhline(0, color="#999", lw=0.8)
         ax.set_xticks(range(len(alle))); ax.set_xticklabels([e[0].replace("__wf__", "").replace(" - ", "\n") for e in alle], fontsize=11)
         ax.set_ylabel("MNOK", fontsize=11); ax.tick_params(axis="y", labelsize=10); ax.spines[["top", "right"]].set_visible(False)
@@ -1155,8 +1157,8 @@ def _render_oppsummering():
         ax.text(_mid / 2, ymax * 1.17, "SFaaS-struktur", ha="center", fontsize=12, fontweight="bold", color="#444")
         ax.text(_mid + (len(alle) - 1 - _mid) / 2, ymax * 1.17, "Verdiskaping - fossefall til samlet verdi" if waterfall else "Konsolidert = summen av de tre",
                 ha="center", fontsize=12, fontweight="bold", color="#444")
-        ax.legend(handles=[_Patch(fc="#2f5d8a", ec="#333", label="Enterprise value"), _Patch(fc="#c8c8c8", ec="#555", label="CAPEX"),
-                           _Patch(fc="#3d7a3d", alpha=0.85, label="Verdiskaping = EV - CAPEX (leietaker: = EV)"), _Patch(fc="#c0392b", alpha=0.75, label="Negativ verdiskaping")],
+        ax.legend(handles=[_Patch(fc="#2f5d8a", ec="#333", label="Enterprise value (NOS leietaker: NPV)"), _Patch(fc="#c8c8c8", ec="#555", label="CAPEX"),
+                           _Patch(fc="#3d7a3d", alpha=0.85, label="Verdiskaping = EV - CAPEX (leietaker: = NPV)"), _Patch(fc="#c0392b", alpha=0.75, label="Negativ verdiskaping")],
                   loc="upper left", fontsize=10, frameon=False)
         ax.set_title(tittel, loc="left", fontsize=13, fontweight="bold")
         fig.tight_layout()
@@ -1168,7 +1170,7 @@ def _render_oppsummering():
             rows.append({"Selskap": e[0], "CAPEX": fmt_int(e[1] / _M) if e[1] else "- (leier)",
                          "EBITDA år 2": fmt_int(e[3] / _M), "EV (DCF)": fmt_int(ev / _M), "Verdiskaping (EV - CAPEX)": fmt_int((ev - grunnlag) / _M),
                          "EV/CAPEX": f"{ev / grunnlag:.2f}x" if grunnlag else "-", "EV/EBITDA år 2": f"{ev / e[3]:.1f}x" if e[3] else "-",
-                         "Sluttverdi-andel": f"{e[5] / ev * 100:.0f} %" if e[6] else "-", "Verdsetting": f"DCF {e[6] * 100:.0f} % / exit {e[7]:.0f}x" if e[6] else (f"{e[7]:.0f}x EBITDA år 2" if e[7] else "sum")})
+                         "Sluttverdi-andel": f"{e[5] / ev * 100:.0f} %" if e[6] else "-", "Verdsetting": (f"NPV (DCF {e[6] * 100:.0f} % / exit {e[7]:.0f}x)" if not e[1] else f"DCF {e[6] * 100:.0f} % / exit {e[7]:.0f}x") if e[6] else (f"{e[7]:.0f}x EBITDA år 2" if e[7] else "sum")})
         return fig, pd.DataFrame(rows)
 
     st.title("Oppsummering - enterprise value mot CAPEX per selskap")
@@ -1241,15 +1243,30 @@ def _render_oppsummering():
            ("2 Big Dippere", _inv_kol(_ent2_, 2, _s2["operator"])),
            ("6 Big Dippere", _inv_kol(_ent6, 6, _s2["operator"]))]
     _ar2 = _s1["operator"]["years"][1] if len(_s1["operator"]["years"]) > 1 else ""
+    def _andel(c, enhet, felt):
+        """Del av konsolidert felt for én enhet: 'beløp (andel %)'. NOS har ingen CAPEX (leier)."""
+        v, tot = c["enheter"][enhet][felt], c[felt]
+        if felt == "capex" and not v:
+            return "- (leier)"
+        return f"{fmt_int(v / _M)} ({v / tot * 100:.0f} %)" if tot else fmt_int(v / _M)
     def _pk(v, kg):
         return fmt_float(v / kg, 2) if kg else "-"
     _rader = [
         ("Laks solgt (t HOG/år)", lambda c: fmt_int(c["kg"] / 1000)),
         ("Salgsinntekter (MNOK)", lambda c: fmt_int(c["salg"] / _M)),
         ("EBITDA (MNOK)", lambda c: fmt_int(c["ebitda"] / _M)),
+        ("EBITDA - SFaaS-rigg (Aqualoop) (MNOK)", lambda c: _andel(c, "rigg", "ebitda")),
+        ("EBITDA - oppdrett (NOS) (MNOK)", lambda c: _andel(c, "nos", "ebitda")),
+        ("EBITDA - landbasert post-smolt (MNOK)", lambda c: _andel(c, "ps", "ebitda")),
         ("EBITDA-margin", lambda c: f"{c['ebitda'] / c['salg'] * 100:.0f} %" if c["salg"] else "-"),
         ("Enterprise value, EV (MNOK)", lambda c: fmt_int(c["ev"] / _M)),
+        ("EV - SFaaS-rigg (Aqualoop) (MNOK)", lambda c: _andel(c, "rigg", "ev")),
+        ("EV - oppdrett (NOS) (MNOK)", lambda c: _andel(c, "nos", "ev")),
+        ("EV - landbasert post-smolt (MNOK)", lambda c: _andel(c, "ps", "ev")),
         ("CAPEX (MNOK)", lambda c: fmt_int(c["capex"] / _M)),
+        ("CAPEX - SFaaS-rigg (Aqualoop) (MNOK)", lambda c: _andel(c, "rigg", "capex")),
+        ("CAPEX - oppdrett (NOS) (MNOK)", lambda c: _andel(c, "nos", "capex")),
+        ("CAPEX - landbasert post-smolt (MNOK)", lambda c: _andel(c, "ps", "capex")),
         ("Salgspris (kr/kg HOG)", lambda c: _pk(c["salg"], c["kg"])),
         ("Opex (kr/kg HOG)", lambda c: _pk(c["opex"], c["kg"])),
         ("EBITDA (kr/kg HOG)", lambda c: _pk(c["ebitda"], c["kg"])),
@@ -1280,7 +1297,7 @@ def _render_oppsummering():
             "Hele verdikjeden konsolidert: Big Dipper-rigg(er) (Aqualoop), oppdrett (NOS) og eget post-smoltanlegg - "
             "internleie og internsalg av post-smolt er nettet ut. Første fulle driftsår med full produksjon (år 2). "
             "Salg = laks solgt; opex = salg - EBITDA (alle driftskostnader i de tre selskapene); EV = sum enterprise "
-            "value (DCF for rigg og post-smoltanlegg, EBITDA-multippel for NOS, som i figurene under); CAPEX = rigg(er) + "
+            "value (DCF for alle tre - netto nåverdi, som i figurene under); CAPEX = rigg(er) + "
             "post-smoltanlegg. Alle kg er HOG solgt laks. FCR = fôr i Big Dipper per kg HOG solgt (biologisk FCR på "
             "WFE-tilvekst i egen rad). 2 Big Dippere deler ett post-smoltanlegg (Fase I.B); 6 = 3 x 2."
         )
@@ -1291,7 +1308,7 @@ def _render_oppsummering():
     st.subheader(f"Seks Big Dippere - {fmt_int(_hog6)} t HOG/år - post-smolt {_fx(_pris2):.0f} kr/kg fra tre anlegg ({_des2.split(' –')[0]})")
     _b1, _b2, _b3 = st.columns(3)
     _b1.metric("Mulig verdi på én konsesjon for blokk på 100 000 tonn", f"{fmt_int(_nos6_ev)} MNOK",
-               help=f"Verdien av selve oppdrettsvirksomheten til havs: NOS oppdretter, 6 selskap, {_nos_mult:.0f}x EBITDA år 2, uten CAPEX og gjeld.")
+               help="Verdien av selve oppdrettsvirksomheten til havs: NOS oppdretter, 6 selskap, netto nåverdi (DCF 8 % / 10x) etter oppstartstap, arbeidskapital og skatt, uten CAPEX og gjeld.")
     _b2.metric("Indirekte verdi av totalpakken (alle tre)", f"{fmt_int(_verdi6)} MNOK",
                help="Samlet verdiskaping (EV - CAPEX) for rigger, oppdrett og post-smoltanlegg - se fossefallet til høyre.")
     _b3.metric("Samlet EV / CAPEX", f"{fmt_int(_ev6)} / {fmt_int(_capex6)} MNOK", help=f"EV/CAPEX {_ev6 / _capex6:.2f}x")
@@ -1301,7 +1318,7 @@ def _render_oppsummering():
     st.markdown("**Én ABD**"); st.dataframe(_tab1, hide_index=True, use_container_width=True)
     st.markdown("**To ABD-er**"); st.dataframe(_tab2, hide_index=True, use_container_width=True)
     st.markdown("**Seks ABD-er (blokk på 100 000 tonn)**"); st.dataframe(_tab6, hide_index=True, use_container_width=True)
-    st.caption(f"Alle tall i MNOK. Rigg og post-smoltanlegg: DCF (8 % / 10x og 7 % / 12x). NOS oppdretter: {_nos_mult:.0f}x EBITDA første fulle år. "
+    st.caption(f"Alle tall i MNOK. Rigg og post-smoltanlegg: DCF (8 % / 10x og 7 % / 12x). NOS oppdretter: DCF (8 % / 10x). "
                "Konsolidert = de tre lagt sammen. To ABD-er = to identiske rigger og oppdrettsselskap (én rigg doblet) og ett post-smoltanlegg som leverer til begge.")
     # ---- Helt nederst: dokumentasjon av lakseprisforutsetningen (ren visning, ingen
     #      beregning, ingen justering i appen) - se prisdokumentasjon.py. Ligger sist
